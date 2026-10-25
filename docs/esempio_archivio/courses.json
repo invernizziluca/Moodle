@@ -1,0 +1,34 @@
+{
+ "generator": "FFHS Moodle Archiver 0.2.0",
+ "site": "http://127.0.0.1:8085",
+ "courses": [
+  {
+   "id": 19,
+   "fullname": "HRM4 Human Resource Management (FS26)",
+   "shortname": "BSc BWL HRM4 FS26",
+   "folder": "HRM4_Human_Resource_Management_FS26",
+   "overview": "HRM4_Human_Resource_Management_FS26/course_overview.md",
+   "fulltext": "HRM4_Human_Resource_Management_FS26/course_fulltext.md",
+   "last_export": 1792702624.3312953,
+   "status": "ok",
+   "files": 15,
+   "missing_items": 5,
+   "startdate": 1771200000,
+   "enddate": 1785452400
+  },
+  {
+   "id": 20,
+   "fullname": "Marketing Grundlagen (FS26)",
+   "shortname": "BSc BWL MAR1 FS26",
+   "folder": "Marketing_Grundlagen_FS26",
+   "overview": "Marketing_Grundlagen_FS26/course_overview.md",
+   "fulltext": "Marketing_Grundlagen_FS26/course_fulltext.md",
+   "last_export": 1792702624.5768194,
+   "status": "ok",
+   "files": 1,
+   "missing_items": 0,
+   "startdate": 1771200000,
+   "enddate": 0
+  }
+ ]
+}
