@@ -26,3 +26,17 @@ L'archivio allegato `BWL8_Decision_Making_and_Change.zip` supera il limite di tr
 di 32 MiB e non è stato aperto né verificato qui.
 
 La prova reale consigliata per Windows è descritta in [Novità 0.3](NOVITA_0.3.md).
+
+La versione corrente è 0.4: vedi anche [Novità 0.4](NOVITA_0.4.md) e `browser_helper/README.md`.
+I test dell'assistente richiedono Node soltanto per lo sviluppo, non per usare l'app su Windows.
+Il test di playback HLS usa ffmpeg se presente, altrimenti viene saltato esplicitamente.
+
+Per creare lo ZIP utente con percorsi brevi:
+
+```bash
+python3 tools/package_release.py --output /tmp/FFHS_Archiver_v0.4.zip
+```
+
+Il campione storico è conservato in `docs/esempio_archivio/esempio_v02.zip`; non eseguire il
+validatore sulla sua cartella esterna come se fosse un archivio di corsi. Non serve estrarlo per
+avviare l'app. I nuovi archivi temporanei creati dai test vengono verificati direttamente.

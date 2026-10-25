@@ -1,12 +1,10 @@
-# Esempio di archivio (dati fittizi, versione 0.2)
+# Esempio storico facoltativo (v0.2)
 
-Generato dal programma su un **Moodle 5.2 di prova** con un corso costruito come il corso HRM descritto
-(sezioni, sottosezioni LERNZIELE/VORBEREITUNG/TRANSFER, pagine, PDF, quiz, compito, forum, libro, glossario,
-elementi ad accesso limitato). Serve solo a mostrare il risultato: i documenti sono file di prova e i link
-«Apri in Moodle» puntano al server di prova, quindi non funzionano.
+`esempio_v02.zip` conserva integralmente i 74 file dimostrativi della versione precedente.
+Non contiene corsi personali e non serve per usare il programma. Il pacchetto per Windows
+non lo include: i suoi vecchi percorsi molto lunghi causavano l’errore 0x80010135 durante
+l’estrazione del progetto.
 
-Contiene anche una sincronizzazione dopo modifiche del docente (file aggiornato con la versione precedente
-conservata, sezione rinominata, nuova risorsa, elemento rimosso e conservato).
-
-Da guardare: `index.md`, poi nella cartella HRM4 `course_overview.md`, `verifica_corso.md`,
-`elementi_mancanti.md` e `course_fulltext.md` (nel forum gli altri studenti sono «Partecipante N»).
+Non estrarre questo esempio dentro la cartella dell’applicazione. Se vuoi consultare il
+campione storico, usa una cartella breve come `C:\Esempio` e uno strumento che supporti
+i percorsi lunghi. I nuovi archivi sono prodotti dal programma aggiornato.

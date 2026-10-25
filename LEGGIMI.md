@@ -5,8 +5,13 @@ sezioni e sottosezioni (LERNZIELE, VORBEREITUNG, …) nell'ordine originale, tes
 obiettivi di apprendimento, istruzioni dei compiti, quiz già svolti, forum e tutti i documenti (PDF, Word,
 PowerPoint, Excel, …) salvati **accanto alla loro descrizione**.
 
-Versione 0.3. Funziona interamente sul tuo computer; le richieste autenticate e i download automatici
-sono limitati a `https://moodle.ffhs.ch`.
+Versione 0.4. Funziona localmente: l'app usa il servizio Moodle; l'assistente opzionale Edge/Chrome
+usa la normale sessione del browser per i player Kaltura/SWITCHcast incorporati in Moodle.
+
+**Novità della 0.4:** ZIP con percorsi brevi, altri formati di indirizzo dei file Moodle, download
+di HLS VOD supportati (playlist **e segmenti**), assistente browser per file/HLS dei player e pulsanti
+per importare file o cartelle video nell'attività corretta. **YouTube resta solo un link.**
+Leggi [Video Kaltura e installazione 0.4](docs/NOVITA_0.4.md).
 
 **Novità della 0.3:** riconosce anche video Moodle diretti nelle attività Link (URL) e nei tag
 `iframe`, `object` ed `embed`. I video che rimangono online, inclusi provider esterni e manifest
@@ -37,11 +42,15 @@ per errore o conservati solo come link, insieme alla fonte e alla nota dell'atti
 ## 2. Installazione (una volta)
 
 1. Prima di estrarre: tasto destro sullo ZIP → **Proprietà** → spunta **«Sblocca»** → OK.
-   Poi estrai in una cartella **stabile**, per esempio `Documenti\FFHS Moodle Archiver`
+   Poi estrai in una cartella **stabile e breve**, per esempio `C:\FFHS`
    (non nella cartella Download: il login usa questo percorso).
 2. Fai **doppio clic su `FFHS Moodle Archiver.pyw`**.
    Se invece si apre un editor di testo, usa `Avvia FFHS Moodle Archiver.bat`.
 3. Nel programma: **File → Crea collegamento sul Desktop**. Da lì in poi basta l'icona.
+
+Il vecchio errore `0x80010135` era causato dal campione storico con percorsi troppo lunghi:
+ora è conservato come ZIP opzionale, non serve estrarlo. Il pacchetto pronto all'uso ha la cartella
+breve `FFHS_Archiver` e non contiene il campione. Non estrarre sopra la vecchia cartella incompleta.
 
 ## 3. Primo test sulla FFHS (nessun download)
 
@@ -156,10 +165,19 @@ descrizione, date e link; non esporta integralmente l'esperienza interattiva.
 I file video diretti serviti da Moodle vengono scaricati quando sono accessibili tramite il servizio
 autenticato e l'opzione video è attiva. Questo include file individuati nelle attività URL e nei tag
 `iframe`, `object` ed `embed`; non significa che ogni pagina incorporata contenga un video scaricabile.
-I player di provider esterni (Kaltura, SWITCHtube, YouTube, …) e i manifest HLS/DASH restano link,
-con una segnalazione nel rapporto dei contenuti mancanti. Questa versione non include un downloader
-di streaming esterni e non aggira autenticazione, DRM o restrizioni di accesso. Un provider potrebbe
-offrire un proprio download ufficiale: in tal caso puoi salvare il file manualmente.
+Gli HLS VOD non cifrati esposti come file Moodle vengono scaricati con tutti i segmenti supportati:
+apri la playlist locale `video.m3u8` con VLC e conserva tutta la cartella.
+
+Per **Kaltura/SWITCHcast** premi **Video Kaltura / browser…** e installa una volta l'assistente
+Edge/Chrome dalla cartella `browser_helper`. Apri l'attività Moodle, autorizza il rilevamento dei
+player incorporati e riproduci il video; l'assistente propone i file e gli HLS supportati rilevati.
+Per HLS salva anche l'eventuale audio separato e pubblica la playlist locale dopo i segmenti.
+Usa **Importa file dal browser…** oppure **Importa cartella video HLS…** e scegli l'attività di
+destinazione: gli originali rimangono in Download, la copia viene collegata nell'archivio.
+
+YouTube non viene scaricato. DASH, live, cifratura/DRM e richieste con intestazioni speciali non
+sono tutti supportati: i motivi restano visibili. La prova sul player Kaltura FFHS reale resta da fare;
+la presenza di un video dentro Moodle non garantisce da sola che il suo server permetta il download.
 
 Per conservarne il contenuto, aprili in Moodle e salva la pagina come PDF (Ctrl+P → «Salva come PDF»)
 **nella cartella dell'attività** (oppure i tuoi appunti, es. `appunti.md`): alla prossima esportazione

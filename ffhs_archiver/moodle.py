@@ -340,33 +340,61 @@ class MoodleClient:
         return path[len(base):] if base and path.startswith(base) else path
 
     def is_file_url(self, url: str) -> bool:
+        return self._file_argument(url) is not None
+
+    def _file_argument(self, url: str) -> tuple[str, str, bool] | None:
+        """Return endpoint, decoded Moodle file argument, and query-style flag.
+
+        Moodle's get_file_argument() accepts both slash arguments and ?file=/...
+        when slash arguments are disabled. Decode either representation exactly
+        once so percent signs and literal plus signs in filenames survive.
+        """
         if not self.is_site_url(url):
-            return False
+            return None
         rel = self._relpath(url)
-        return rel.startswith(("/pluginfile.php/", "/webservice/pluginfile.php/", "/tokenpluginfile.php/"))
+        endpoints = ("/pluginfile.php", "/webservice/pluginfile.php", "/tokenpluginfile.php")
+        for endpoint in endpoints:
+            if rel.startswith(endpoint + "/"):
+                argument = urllib.parse.unquote(rel[len(endpoint):])
+                if argument != "/":
+                    return endpoint, argument, False
+            elif rel == endpoint:
+                arguments = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("file", [])
+                if len(arguments) == 1 and arguments[0].startswith("/") and arguments[0] != "/":
+                    return endpoint, arguments[0], True
+        return None
 
     def file_key(self, url: str) -> str:
         """Stable identity of a Moodle file: '<contextid>/<component>/<area>/<itemid>/<path>'."""
-        rel = urllib.parse.unquote(self._relpath(url))
-        for prefix in ("/webservice/pluginfile.php/", "/pluginfile.php/"):
-            if rel.startswith(prefix):
-                return rel[len(prefix):]
-        if rel.startswith("/tokenpluginfile.php/"):
-            return rel.split("/", 3)[3] if rel.count("/") >= 3 else rel
-        return rel
+        reference = self._file_argument(url)
+        if reference is None:
+            return urllib.parse.unquote(self._relpath(url))
+        endpoint, argument, _ = reference
+        key = argument.lstrip("/")
+        if endpoint == "/tokenpluginfile.php":
+            # These URLs place a temporary core_files key before the file path.
+            key = key.split("/", 1)[1] if "/" in key else key
+        return key
 
     def tokenized_file_url(self, url: str) -> str:
         """webservice/pluginfile.php URL with the token, for a file on this Moodle site only."""
-        if not self.is_file_url(url):
+        reference = self._file_argument(url)
+        if reference is None:
             raise MoodleError("URL di file non appartenente al sito Moodle", "notsitefile")
         p = urllib.parse.urlsplit(url)
-        rel = self._relpath(url)
-        if rel.startswith("/pluginfile.php/"):
-            rel = "/webservice/pluginfile.php/" + rel[len("/pluginfile.php/"):]
-        elif rel.startswith("/tokenpluginfile.php/"):
-            parts = rel.split("/", 3)
-            rel = "/webservice/pluginfile.php/" + (parts[3] if len(parts) > 3 else "")
-        query = [(k, v) for k, v in urllib.parse.parse_qsl(p.query, keep_blank_values=True) if k.lower() != "token"]
+        endpoint, _, query_style = reference
+        query = [(k, v) for k, v in urllib.parse.parse_qsl(p.query, keep_blank_values=True)
+                 if k.lower() not in ("token", "file")]
+        if query_style:
+            # Keep query-style access for sites whose web server rejects PATH_INFO.
+            rel = "/webservice/pluginfile.php"
+            query.insert(0, ("file", "/" + self.file_key(url)))
+        elif endpoint == "/webservice/pluginfile.php":
+            rel = self._relpath(url)
+        elif endpoint == "/pluginfile.php":
+            rel = "/webservice/pluginfile.php" + self._relpath(url)[len(endpoint):]
+        else:
+            rel = "/webservice/pluginfile.php/" + urllib.parse.quote(self.file_key(url), safe="/")
         query.append(("token", self.token))
         return urllib.parse.urlunsplit((self._site.scheme, self._site.netloc, self._site.path + rel,
                                         urllib.parse.urlencode(query), ""))

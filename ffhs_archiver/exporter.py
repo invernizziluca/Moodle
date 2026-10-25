@@ -8,6 +8,8 @@ import logging
 import os
 import posixpath
 import re
+import shutil
+import tempfile
 import threading
 import time
 import traceback
@@ -25,6 +27,7 @@ from .moodle import CancelledError, MoodleClient, MoodleError, NetworkError, Tok
 from .naming import UniqueNames, human_size, rel_link, safe_filename, slug
 from .privacy import Pseudonymizer, scrub_secrets
 from .state import STATE_DIR, ArchiveIndex, CourseState
+from .hls import download_hls
 
 log = logging.getLogger(__name__)
 
@@ -120,9 +123,10 @@ LINK_ONLY_NOTES = {
 MANUAL_TIP = ("Per conservarne il contenuto: aprilo in Moodle e salva la pagina come PDF (Ctrl+P → «Salva come "
               "PDF») nella cartella di questa attività. Alla prossima esportazione il file verrà collegato qui, "
               "nella panoramica e nel testo completo.")
-VIDEO_TIP = ("Questa versione scarica i file video accessibili sul sito Moodle, ma non i player esterni "
-             "o gli streaming HLS/DASH. Apri il link e verifica se il servizio offre un download ufficiale; "
-             "puoi salvare il file o i tuoi appunti nella cartella dell'attività. Le aggiunte manuali "
+VIDEO_TIP = ("Il download automatico gestisce i file Moodle e gli HLS VOD supportati sullo stesso sito. "
+             "Per Kaltura/SWITCHcast usa il pulsante «Video Kaltura / browser» nell'app: "
+             "l'assistente rileva file e HLS nella tua sessione del browser. YouTube resta un link. "
+             "Puoi importare file o intere cartelle HLS nell'attività. Le aggiunte manuali "
              "verranno collegate automaticamente, senza essere considerate una verifica di completezza.")
 VIDEO_MODS = {"kalvidres", "kalvidassign", "bigbluebuttonbn", "zoom"}
 MISSING_GROUPS = (
@@ -707,10 +711,16 @@ class CourseExport:
         if existing is not None:
             return existing
         host = owner.parent if owner.kind == "label" and owner.parent else owner
-        filename = safe_filename(name or unquote(urlsplit(url).path.rsplit("/", 1)[-1]) or "datei", 80)
+        filename = safe_filename(name or fk.rsplit("/", 1)[-1] or "datei", 80)
         if is_video_filename(filename) or is_audio_filename(filename):
             kind = "video"
-        spec = FileSpec(key="media:" + self._norev(fk), url=url, rel_path=join_rel(host.rel_dir, subdir, filename),
+        rel_path = join_rel(host.rel_dir, subdir, filename)
+        if self._stream_extension(url) == ".m3u8":
+            kind = "hls"
+            folder = slug(Path(filename).stem, 20) + "_hls_" + hashlib.sha1(fk.encode()).hexdigest()[:8]
+            rel_path = join_rel(host.rel_dir, subdir, folder, "video.m3u8")
+            size = None  # the manifest size does not describe the recording
+        spec = FileSpec(key="media:" + self._norev(fk), url=url, rel_path=rel_path,
                         size=size, mtime=mtime, kind=kind, label=filename, owner=owner.key,
                         conditional=size is None or mtime is None)
         return self._add_spec(spec)
@@ -722,10 +732,16 @@ class CourseExport:
         filepath = f.get("filepath") or "/"
         segs = [safe_filename(seg, 60) for seg in filepath.strip("/").split("/") if seg]
         folder = join_rel(owner.rel_dir, subdir, *segs)
-        spec = FileSpec(key=f"{key_prefix}:{filepath}{f.get('filename')}", url=url,
-                        rel_path=join_rel(folder, safe_filename(f.get("filename") or "datei", 80)),
+        filename = f.get("filename") or self.client.file_key(url).rsplit("/", 1)[-1] or "datei"
+        if self._stream_extension(url) == ".m3u8":
+            return self._media_spec(url, owner, name=filename, subdir=subdir)
+        if self._stream_extension(url) == ".mpd":
+            self._missing_stream(owner, url)
+            return None
+        spec = FileSpec(key=f"{key_prefix}:{filepath}{filename}", url=url,
+                        rel_path=join_rel(folder, safe_filename(filename, 80)),
                         size=f.get("filesize"), mtime=f.get("timemodified"), mimetype=f.get("mimetype") or "",
-                        kind=kind, label=f.get("filename") or "", owner=owner.key)
+                        kind=kind, label=filename, owner=owner.key)
         if is_video_filename(spec.label) or is_audio_filename(spec.label):
             spec.kind = "video" if kind == "material" else kind
         return self._add_spec(spec)
@@ -740,7 +756,10 @@ class CourseExport:
                 if c.get("type") != "file" or not c.get("fileurl"):
                     continue
                 if self._stream_manifest(c["fileurl"]):
-                    self._missing_stream(item, c["fileurl"])
+                    if self.client.is_file_url(c["fileurl"]) and self._stream_extension(c["fileurl"]) == ".m3u8":
+                        self._media_spec(c["fileurl"], item)
+                    else:
+                        self._missing_stream(item, c["fileurl"])
                     continue
                 if item.modname == "page":
                     if c.get("filename") != "index.html":
@@ -753,7 +772,7 @@ class CourseExport:
         limit = int(self.opts.max_file_mb or 0) * 1024 * 1024
         for spec in self.specs:
             owner = self.items.get(spec.owner)
-            if spec.kind == "video" and not self.opts.include_videos:
+            if spec.kind in ("video", "hls") and not self.opts.include_videos:
                 spec.status, spec.message = "skipped", "file video escluso dalle impostazioni"
             elif limit and spec.size and spec.size > limit:
                 spec.status, spec.message = "skipped", f"file più grande di {self.opts.max_file_mb} MB"
@@ -762,9 +781,12 @@ class CourseExport:
                 self.counts["skipped"] += 1
 
     # ------------------------------------------------------------------ link/file resolution for HTML
-    @staticmethod
-    def _stream_manifest(url: str) -> bool:
-        return unquote(urlsplit(url).path).lower().endswith((".m3u8", ".mpd"))
+    def _stream_extension(self, url: str) -> str:
+        path = self.client.file_key(url) if self.client.is_file_url(url) else unquote(urlsplit(url).path)
+        return Path(path).suffix.lower()
+
+    def _stream_manifest(self, url: str) -> bool:
+        return self._stream_extension(url) in (".m3u8", ".mpd")
 
     def _missing_stream(self, item: Item, url: str) -> None:
         self._missing(item, "Video in streaming HLS/DASH: playlist/manifest conservato solo come link; "
@@ -798,7 +820,7 @@ class CourseExport:
     def _file_target(self, url: str, label: str, kind: str, item: Item) -> str | None:
         if not self.client.is_file_url(url):
             return None
-        if self._stream_manifest(url):
+        if self._stream_extension(url) == ".mpd":
             self._missing_stream(item, url)
             return None
         spec = self._media_spec(url, item, kind="video" if kind in ("video", "audio") else "media")
@@ -827,7 +849,7 @@ class CourseExport:
                         return f"@@ITEM:{it.key}@@"
             return "@@ITEM:course@@"
         if self.client.is_file_url(url):
-            if self._stream_manifest(url):
+            if self._stream_extension(url) == ".mpd":
                 self._missing_stream(item, url)
                 return None
             spec = self._media_spec(url, item, kind="linked")
@@ -955,6 +977,11 @@ class CourseExport:
         item.body = "## Contenuto\n\n" + body if body else ""
 
     def _h_resource(self, item: Item, inst: dict, conv: Converter) -> None:
+        # Some API responses expose files only in the module-specific endpoint.
+        for entry in inst.get("contentfiles") or []:
+            url = entry.get("fileurl")
+            if url and self.client.file_key(url) not in self.spec_by_url:
+                self._file_entry_spec(entry, item, "", "material", f"cm:{item.raw['id']}")
         if not any(s.owner == item.key for s in self.specs):
             self._missing(item, "Nessun file scaricabile per questa risorsa")
 
@@ -968,7 +995,7 @@ class CourseExport:
             self._missing(item, "Indirizzo del link non disponibile")
             return
         provider, canonical = classify_media_url(ext)
-        if self.client.is_file_url(ext) and not self._stream_manifest(ext):
+        if self.client.is_file_url(ext) and self._stream_extension(ext) != ".mpd":
             spec = self._media_spec(ext, item, kind="material", subdir="")
             item.body = f"**File collegato:** [{escape_md(spec.label)}](@@FILE:{spec.index}@@)"
             return
@@ -1315,11 +1342,48 @@ class CourseExport:
 
     def _reconcile_moves(self) -> None:
         moves = []
+        hls_moves = []
         for spec in self.specs:
             entry = self.state.files.get(spec.key)
             if entry and entry.get("path") and entry["path"] != spec.rel_path and \
                     fsutil.is_file(self.root / entry["path"]):
-                moves.append((spec, entry["path"]))
+                (hls_moves if spec.kind == "hls" else moves).append((spec, entry["path"]))
+        # An HLS playlist is useful only together with its initialization/media
+        # files. Stage and move the whole generated directory, including cycles
+        # caused by renamed/reordered activities, before changing saved paths.
+        hls_staged = []
+        hls_committed = []
+        try:
+            for spec, old in hls_moves:
+                source = (self.root / old).parent
+                dest = (self.root / spec.rel_path).parent
+                if source == dest:
+                    continue
+                staging = self.root / STATE_DIR / "staging"
+                tmp = staging / ("hls-" + hashlib.sha1(spec.key.encode("utf-8")).hexdigest())
+                if fsutil.exists(tmp):
+                    raise FileExistsError(f"Spostamento HLS precedente da recuperare: {tmp}")
+                fsutil.move(source, tmp)
+                hls_staged.append((spec, old, source, tmp, dest))
+            for move in hls_staged:
+                spec, old, source, tmp, dest = move
+                if fsutil.exists(dest):
+                    raise FileExistsError(f"La destinazione HLS contiene già dei file: {dest}")
+                fsutil.move(tmp, dest)
+                hls_committed.append(move)
+        except BaseException:
+            for spec, old, source, tmp, dest in reversed(hls_committed):
+                fsutil.move(dest, tmp)
+            for spec, old, source, tmp, dest in reversed(hls_staged):
+                if fsutil.exists(tmp):
+                    fsutil.move(tmp, source)
+            raise
+        for spec, old, source, tmp, dest in hls_staged:
+            self.state.files[spec.key]["path"] = spec.rel_path
+            fsutil.remove_empty_dirs(self.root, source.parent)
+            self.counts["moved"] += 1
+        if hls_staged:
+            self.state.save()
         if not moves:
             return
         staging = self.root / STATE_DIR / "staging"
@@ -1397,6 +1461,9 @@ class CourseExport:
             self.x.emit("progress", scope="bytes", done=done, total=size or 0, message=spec.label)
 
         try:
+            if spec.kind == "hls":
+                self._download_hls_spec(spec, progress)
+                return
             res = self.client.download(spec.url, target, expected_size=spec.size, if_modified_since=ims,
                                        progress=progress)
         except (TokenInvalidError, NetworkError, CancelledError):
@@ -1439,10 +1506,56 @@ class CourseExport:
             self.counts["new"] += 1
         self._record(spec, res.size, res.last_modified)
 
+    def _download_hls_spec(self, spec: FileSpec, progress) -> None:
+        """Refresh a complete generated HLS directory, preserving the old copy on failure."""
+        dest = (self.root / spec.rel_path).parent
+        fsutil.ensure_dir(dest.parent)
+        with tempfile.TemporaryDirectory(prefix=".recording-", dir=fsutil.lp(dest.parent)) as temp:
+            staged = Path(temp) / "hls"
+            result = download_hls(self.client, spec.url, staged,
+                                  max_bytes=int(self.opts.max_file_mb or 0) * 1024 * 1024,
+                                  progress=progress)
+            def signature(folder):
+                return {p.relative_to(folder).as_posix(): fsutil.sha256_file(p)
+                        for p in folder.rglob("*") if p.is_file()}
+            have = fsutil.is_file(dest / "video.m3u8")
+            if have and signature(dest) == signature(staged):
+                spec.status = "unchanged"
+            else:
+                backup = None
+                if fsutil.exists(dest):
+                    # Keep the old recording outside the auto-cleaned staging
+                    # directory until publication succeeds. Even when versions
+                    # are disabled, a failed replacement must keep old playback.
+                    backup = dest.with_name(f".previous-{time.time_ns()}")
+                    fsutil.move(dest, backup)
+                try:
+                    fsutil.move(staged, dest)
+                except BaseException:
+                    if backup is not None and fsutil.exists(backup):
+                        try:
+                            if fsutil.exists(dest):
+                                shutil.rmtree(fsutil.lp(dest))
+                            fsutil.move(backup, dest)
+                        except OSError as exc:
+                            raise OSError(f"Ripristino HLS fallito; copia precedente conservata in {backup}") from exc
+                    raise
+                if backup is not None:
+                    if self.opts.keep_versions:
+                        previous = self.root / VERSIONS_DIR / f"hls_{time.time_ns()}"
+                        fsutil.move(backup, previous)
+                    else:
+                        shutil.rmtree(fsutil.lp(backup))
+                spec.status = "updated" if have else "new"
+            self.counts[spec.status] += 1
+            self._record(spec, result.total_bytes, "")
+            spec.message = "HLS offline: apri video.m3u8 con VLC; conserva tutta la cartella"
+
     def _scan_manual_files(self) -> None:
         """Files the user saved into an activity folder (e.g. a PDF printout of an H5P activity)."""
         known = {s.rel_path.lower() for s in self.specs}
         known |= {str(e.get("path", "")).lower() for e in self.state.files.values()}
+        generated_hls = {posixpath.dirname(s.rel_path).lower() for s in self.specs if s.kind == "hls"}
         root_lp = fsutil.lp(self.root)
         for item in self._walk():
             if item.kind != "activity" or not item.rel_dir:
@@ -1452,7 +1565,9 @@ class CourseExport:
                 continue
             found = []
             for dirpath, dirnames, filenames in os.walk(fsutil.lp(folder)):
-                dirnames[:] = sorted(d for d in dirnames if d != MEDIA_DIR and not d.startswith("."))
+                dirnames[:] = sorted(d for d in dirnames if d != MEDIA_DIR and not d.startswith(".") and
+                                     os.path.relpath(os.path.join(dirpath, d), root_lp)
+                                     .replace(os.sep, "/").lower() not in generated_hls)
                 for name in sorted(filenames):
                     if name.startswith(".") or name.endswith((".part", ".new", ".tmp")):
                         continue
@@ -1522,7 +1637,7 @@ class CourseExport:
             parts.append(f"[Apri in Moodle]({md_url(item.url)})")
         return " · ".join(parts)
 
-    def _files_of(self, item: Item, kinds: tuple = ("material", "video")) -> list:
+    def _files_of(self, item: Item, kinds: tuple = ("material", "video", "hls")) -> list:
         return [s for s in self.specs if s.owner == item.key and s.kind in kinds]
 
     def _file_line(self, spec: FileSpec, indent: str = "") -> str:
@@ -1627,7 +1742,7 @@ class CourseExport:
                 blocks.extend(self._overview_tree(child, level + 1))
             else:
                 run.append(self._child_line(child))
-                for spec in self._files_of(child, ("material", "video", "submission", "feedback", "attachment")):
+                for spec in self._files_of(child, ("material", "video", "hls", "submission", "feedback", "attachment")):
                     run.append(self._file_line(spec, "  "))
                 for rel in child.manual_files:
                     run.append(f"  - [{escape_md(posixpath.basename(rel))}](@@PATH:{quote(rel, safe='/')}@@)"
@@ -1742,7 +1857,8 @@ class CourseExport:
             return "limitato"
         if "download non riuscito" in low:
             return "errore"
-        if "escluse dalle impostazioni" in low or "escluso dalle impostazioni" in low or "più grande di" in low:
+        if "escluse dalle impostazioni" in low or "escluso dalle impostazioni" in low or \
+                "più grande di" in low or "limite impostato" in low:
             return "impostazioni"
         if low.startswith(("video", "audio")):
             return "video"
@@ -1802,7 +1918,7 @@ class CourseExport:
             return escape_md(value).replace("|", "\\|").replace("\n", " ")
 
         for spec in self.specs:
-            if spec.kind != "video" and not (is_video_filename(spec.label) or is_audio_filename(spec.label)):
+            if spec.kind not in ("video", "hls") and not (is_video_filename(spec.label) or is_audio_filename(spec.label)):
                 continue
             owner = self.items.get(spec.owner)
             activity = (f"[{cell(owner.title)}]({md_url(owner.md_path)})" if owner and owner.md_path
@@ -1817,7 +1933,7 @@ class CourseExport:
             for reason, url in item.missing:
                 if self._missing_kind(item, reason) != "video":
                     continue
-                if any(spec.url == url and spec.kind == "video" for spec in self.specs):
+                if any(spec.url == url and spec.kind in ("video", "hls") for spec in self.specs):
                     continue
                 note_path = item.md_path if item.kind == "activity" else "course_overview.md"
                 activity = f"[{cell(item.title)}]({md_url(note_path)})"

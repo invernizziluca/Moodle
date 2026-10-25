@@ -587,9 +587,11 @@ class Converter:
         # Only offer recognized Moodle file endpoints on the configured site to
         # the file resolver; ordinary iframe pages and external providers stay links.
         path = urlsplit(url).path
-        file_endpoint = re.search(r"/(?:webservice/pluginfile|pluginfile|tokenpluginfile)\.php/", path)
+        file_endpoint = re.search(r"/(?:webservice/pluginfile|pluginfile|tokenpluginfile)\.php(?:/|$)", path)
+        query_file = parse_qs(urlsplit(url).query).get("file", [])
         if file_endpoint and self.is_site_url(url) and self.resolve_file:
-            name = unquote(path.rsplit("/", 1)[-1])
+            file_path = query_file[0] if len(query_file) == 1 else path
+            name = unquote(file_path.rsplit("/", 1)[-1])
             kind = "video" if is_video_filename(name) else "audio" if is_audio_filename(name) else "file"
             label = normalize_space(title or name).strip()
             local = self.resolve_file(url, label, kind)

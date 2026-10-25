@@ -63,7 +63,7 @@ class FixtureOpener:
         page = (f'<iframe src="{file_url("lecture.pdf")}" title="Lecture"></iframe>'
                 f'<object data="{file_url("embedded-clip.mp4")}" title="Object video"></object>'
                 '<iframe src="https://www.youtube.com/embed/abcdefghijk" title="External video"></iframe>'
-                f'<video src="{file_url("playlist.m3u8")}" title="HLS"></video>'
+                '<video src="https://media.example.org/playlist.m3u8" title="HLS"></video>'
                 f'<video src="{file_url("manifest.mpd")}" title="DASH"></video>')
         self.api = {
             "core_course_get_contents": self.contents,
