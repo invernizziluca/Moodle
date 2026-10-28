@@ -5,6 +5,8 @@ from pathlib import Path
 from .browser_import import _archive_root, _inside, _read_json, list_activities
 from .extension_bridge import DownloadSession, EXTENSIONS, is_youtube_url, open_moodle_page, safe_moodle_url
 from .extension_import import import_buddy_downloads, import_fetchv_downloads, is_fetchv_filename
+from .extension_import import (assign_buddy_files as _assign_buddy_files,
+                               list_unmatched_buddy_files)
 from . import fsutil
 from .html2md import escape_md
 from .naming import rel_link
@@ -21,7 +23,7 @@ def course_targets(archive_root, course_id):
     activity_keys = {a["key"] for a in list_activities(root, course_id)}
     result = []
 
-    def visit(nodes):
+    def visit(nodes, parents=()):
         for node in nodes:
             if node.get("key") in activity_keys:
                 url = node.get("moodle_url") or ""
@@ -34,10 +36,22 @@ def course_targets(archive_root, course_id):
                 links = [entry.get("url", "") for entry in node.get("links") or []]
                 youtube_only = node.get("type") == "url" and bool(links) and all(is_youtube_url(u) for u in links)
                 result.append({"key": node["key"], "title": node.get("title") or node["key"],
+                               "label": " › ".join((*parents, node.get("title") or node["key"])),
                                "url": url, "youtube_only": youtube_only})
-            visit(node.get("children") or [])
+            context = parents if node.get("key") in activity_keys else (*parents, node.get("title") or "Sezione")
+            visit(node.get("children") or [], context)
 
     visit(structure.get("sections") or [])
+    return result
+
+
+def assign_buddy_files(archive_root, course_id, item_ids, activity_key):
+    """Resolve existing copies in place and refresh the course entry point."""
+    result = _assign_buddy_files(archive_root, course_id, item_ids, activity_key)
+    try:
+        refresh_extension_index(archive_root, course_id)
+    except (OSError, ValueError) as exc:
+        result["index_warning"] = str(exc)
     return result
 
 
@@ -87,6 +101,7 @@ class ExtensionWorkflow:
         return candidates
 
     def collect(self, candidates):
+        candidates = list(candidates)
         sources = self.session.validate_candidates(candidates)
         if self.tool == "fetchv":
             if any(not is_fetchv_filename(p.name) for p in sources):
@@ -96,6 +111,7 @@ class ExtensionWorkflow:
         else:
             result = import_buddy_downloads(sources, self.root, self.course_id,
                                            download_root=self.session.directory, activity_key=self.activity_key)
+        self.session.mark_imported(candidates)
         try:
             refresh_extension_index(self.root, self.course_id)
         except (OSError, ValueError) as exc:
@@ -124,6 +140,16 @@ def refresh_extension_index(archive_root, course_id):
             continue
         ledger = _read_json(course, relative)
         lines.extend(["## " + label, ""])
+        if key == "moodle_buddy":
+            remaining = len(list_unmatched_buddy_files(root, course_id))
+            lines.extend([f"Collegamenti da scegliere: **{remaining}**. "
+                          "Puoi completarli nella scheda File da collegare dell'app.", ""])
+            current = [path for name, path in ledger.get("reports", {}).items()
+                       if name.startswith("associations:")]
+            if current:
+                _inside(course, current[-1])
+                lines.extend([f"[Ultimo stato degli abbinamenti]({rel_link('download_estensioni.md', current[-1])})",
+                              "", "I rapporti precedenti qui sotto sono storici: descrivono lo stato al momento dell'operazione.", ""])
         for report in dict.fromkeys(ledger.get("reports", {}).values()):
             path = _inside(course, report)
             lines.append(f"- [Rapporto: {escape_md(path.parent.name)}]({rel_link('download_estensioni.md', report)})")

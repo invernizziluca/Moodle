@@ -1,4 +1,4 @@
-# FFHS Moodle Archiver 0.5 — guida
+# FFHS Moodle Archiver 0.5.1 — guida
 
 Il flusso principale usa le **vere estensioni Moodle Buddy e FetchV** installate nel tuo browser.
 Il programma esporta struttura e testi del corso, poi organizza i download delle estensioni.
@@ -22,11 +22,9 @@ disattivate nella migrazione delle vecchie impostazioni.
 2. Premi **Documenti con Moodle Buddy…**. Se manca la struttura locale, l'app la prepara con testi
    e metadati API, senza scaricare i materiali o chiedere auto-login video.
 3. Scegli la cartella in cui il browser salva i download. Sono controllate anche le sottocartelle.
-4. Lascia **Destinazione: Automatico** per abbinare i nomi esatti univoci, oppure scegli un'attività
-   per associare esplicitamente a essa tutti i file che selezionerai nella raccolta.
-5. Premi **Apri Moodle per Moodle Buddy**. Nella pagina del corso usa l'icona dell'estensione vera.
-6. Attendi la fine dei download in `Ctrl+J`, torna all'app e premi **Download terminati: cerca file**.
-7. Controlla la selezione, deseleziona eventuali file estranei e premi **Importa selezionati**.
+4. Premi **1 · Apri Moodle**. Nella pagina del corso usa l'icona dell'estensione vera.
+5. Attendi la fine dei download in `Ctrl+J`, torna all'app e premi **2 · Cerca download**.
+6. Controlla la selezione, deseleziona eventuali file estranei e premi **3 · Importa selezionati**.
 
 Moodle Buddy può produrre file singoli in una gerarchia corso/sezione e ZIP delle cartelle Moodle.
 L'app copia entrambi, estrae gli ZIP sicuri e accorcia i nomi locali quando necessario, conservando
@@ -34,13 +32,21 @@ i percorsi originali nel rapporto. Gli originali del browser non vengono spostat
 
 L'associazione automatica richiede un nome esatto presente in **una sola attività** nei metadati.
 Nomi ambigui, nomi cambiati dal browser come `lezione (1).pdf` e file non esposti dalle API restano
-**Da associare**. Per risolverli, apri una nuova raccolta, scegli l'attività e usa **File già scaricati…**.
+**Da associare**. La scheda **File da collegare** si apre nella stessa finestra: seleziona uno o più
+file, scegli l'attività e premi **Collega selezionati**. Nessun file viene ricopiato o riscaricato.
+Puoi chiudere e riprendere in seguito: la scheda recupera anche le importazioni fatte con la 0.5.
+La scelta resta salvata e viene rispettata nelle importazioni successive dello stesso file e percorso.
+
+I file con lo stesso contenuto vengono conservati in una sola copia, anche se presenti più volte nei
+download. Per questo il numero dei **file conservati** può essere diverso dal numero dei **collegamenti
+da scegliere**, che distingue i percorsi originali. Il vecchio messaggio mescolava questi conteggi.
+I registri 0.5 non salvavano le assegnazioni manuali: in quei casi può servire una conferma una volta.
 
 ## Video con FetchV
 
 1. Evidenzia il corso e premi **Video con FetchV…**.
 2. Scegli l'attività del video, la cartella Download e il browser in cui hai FetchV.
-3. Premi **Apri Moodle per FetchV**. Avvia il video nella pagina reale e scaricalo con FetchV.
+3. Premi **1 · Apri Moodle**. Avvia il video nella pagina reale e scaricalo con FetchV.
 4. Attendi il file finale in `Ctrl+J` (per esempio MP4), non un segmento o un file temporaneo.
 5. Torna nell'app, cerca i nuovi file, controlla la selezione e importa.
 
@@ -88,7 +94,7 @@ grafico con estensioni. Non sono necessarie per l'alternativa 1.
 | Elenco vuoto | Controlla la cartella effettiva e usa File già scaricati per quelli precedenti alla sessione. |
 | Troppi file nella cartella | Scegli una sottocartella usata dall'estensione. La lista non viene troncata in silenzio. |
 | Download ancora in corso | Aspetta la fine in Ctrl+J e aggiorna l'elenco. |
-| File Da associare | Scegli esplicitamente l'attività in una nuova raccolta. |
+| File Da associare | Nella scheda File da collegare seleziona i file, scegli l'attività e premi Collega selezionati. |
 | Account scaduto | Accedi nell'app per le API e nel browser per le estensioni. |
 | Vecchio campione troppo lungo da estrarre | È facoltativo; usa il pacchetto dell'app con percorsi brevi. |
 

@@ -1,5 +1,20 @@
 # Versione 0.5 — Moodle Buddy e FetchV reali
 
+## Aggiornamento 0.5.1 — meno passaggi per i casi dubbi
+
+I file da associare si sistemano nella stessa finestra: scheda **File da collegare**, scelta
+dell'attività e **Collega selezionati**. Non occorre riaprire la raccolta o selezionare nuovamente
+i download. Sono recuperati anche quelli importati con la 0.5; le scelte vengono salvate e rispettate
+nelle importazioni successive. Nessuna copia aggiuntiva dei materiali durante l'assegnazione.
+
+Il messaggio con 7 nuovi, 8 associati e 4 da associare mescolava copie uniche e occorrenze nei
+download. Ora i file conservati e i collegamenti da scegliere sono indicati separatamente.
+Niente popup informativo dopo l'importazione. I pulsanti sono numerati e i nomi dei file sono
+visibili prima dei lunghi percorsi del corso. La scheda rimane disponibile per riprendere più tardi.
+L'indice collega l'ultimo stato delle associazioni e distingue i rapporti storici.
+
+## Base 0.5
+
 La base è la 0.3 aggiornata allegata dall'utente: layout leggibile per Obsidian, note nelle sezioni,
 cartelle allegati, pagina iniziale e indice dei file. Queste funzioni sono mantenute insieme alle
 correzioni per percorsi ZIP e URL `?file=`.

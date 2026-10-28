@@ -14,7 +14,8 @@ from zipfile import ZipFile
 
 from ffhs_archiver.appdata import Settings
 from ffhs_archiver.exporter import Exporter, ExportOptions
-from ffhs_archiver.extension_workflow import ExtensionWorkflow, course_targets
+from ffhs_archiver.extension_workflow import (ExtensionWorkflow, course_targets,
+                                             assign_buddy_files, list_unmatched_buddy_files)
 from ffhs_archiver.moodle import MoodleClient, READ_ONLY_FUNCTIONS
 from ffhs_archiver.verify import moodle_checks
 from test_export_media import FixtureOpener, COURSE, SITE, TOKEN
@@ -95,6 +96,32 @@ class WorkflowTests(unittest.TestCase):
         selected = workflow.review_existing([original])
         self.assertEqual(workflow.collect(selected)["files"][0].read_bytes(), original.read_bytes())
 
+    def test_resolve_existing_import_updates_index_and_survives_metadata_refresh(self):
+        original = self.downloads / "unknown handout.pdf"
+        original.write_bytes(b"handout imported once")
+        workflow = ExtensionWorkflow(self.archive, COURSE["id"], "moodle_buddy", self.downloads)
+        imported = workflow.collect(workflow.review_existing([original]))
+        pending = list_unmatched_buddy_files(self.archive, COURSE["id"])
+        self.assertEqual(len(pending), 1)
+        original.unlink()  # assignment must use the already archived bytes
+        copied_before = imported["files"][0].stat()
+        result = assign_buddy_files(self.archive, COURSE["id"], [pending[0]["id"]], "cm:102")
+        self.assertNotIn("index_warning", result)
+        self.assertEqual(list_unmatched_buddy_files(self.archive, COURSE["id"]), [])
+        self.assertEqual(imported["files"][0].stat(), copied_before)
+        index_before = (self.course / "download_estensioni.md").read_text()
+        self.assertIn("Collegamenti da scegliere: **0**", index_before)
+        self.assertIn("Ultimo stato degli abbinamenti", index_before)
+        opener = FixtureOpener()
+        client = MoodleClient(SITE, TOKEN, min_interval=0, retries=0)
+        client._opener = opener
+        client.site_info_data = {"userid": 1}
+        client.functions = set(opener.api)
+        Exporter(client, ExportOptions(dest=str(self.archive), download_files=False)).export([COURSE])
+        self.assertEqual((self.course / "download_estensioni.md").read_text(), index_before)
+        self.assertEqual(list_unmatched_buddy_files(self.archive, COURSE["id"]), [])
+        self.assertEqual(verify_archive(self.archive), 0)
+
     def test_fetchv_preview_and_import_accept_the_same_final_media_formats(self):
         workflow = ExtensionWorkflow(self.archive, COURSE["id"], "fetchv", self.downloads, "cm:102")
         expected = {}
@@ -118,6 +145,21 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cambiato"):
             workflow.collect(selected)
         self.assertFalse(list(self.course.rglob("fetchv_imports.json")))
+
+    def test_next_scan_keeps_unselected_or_changed_files_and_retries_failures(self):
+        workflow = ExtensionWorkflow(self.archive, COURSE["id"], "moodle_buddy", self.downloads)
+        first, other = self.downloads / "lecture.pdf", self.downloads / "other.pdf"
+        first.write_bytes(b"lecture")
+        other.write_bytes(b"another handout")
+        selected = [c for c in workflow.preview() if c.path == first]
+        with patch("ffhs_archiver.extension_workflow.import_buddy_downloads", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                workflow.collect(selected)
+        self.assertEqual({c.path for c in workflow.preview()}, {first, other})
+        workflow.collect([c for c in workflow.preview() if c.path == first])
+        self.assertEqual([c.path for c in workflow.preview()], [other])
+        first.write_bytes(b"a newer version of the lecture")
+        self.assertEqual({c.path for c in workflow.preview()}, {first, other})
 
     def test_manual_buddy_association_is_explicit_and_youtube_is_not_a_fetchv_target(self):
         structure_path = self.course / "course_structure.json"

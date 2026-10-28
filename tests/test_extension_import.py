@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZipFile, ZipInfo
 
-from ffhs_archiver.extension_import import import_buddy_downloads, import_fetchv_downloads
+from ffhs_archiver.extension_import import (assign_buddy_files, import_buddy_downloads,
+                                            import_fetchv_downloads, list_unmatched_buddy_files)
 
 
 class ExtensionImportTests(unittest.TestCase):
@@ -81,6 +82,96 @@ class ExtensionImportTests(unittest.TestCase):
         self.assertEqual(len(result["unmatched"]), 3)
         self.assertIn("Da associare", result["report_path"].read_text())
         self.assertFalse(list(self.course.glob("section/*/materiali_moodle_buddy*.md")))
+
+    def test_assign_archived_file_without_original_or_another_copy(self):
+        self.use_flat_notes()
+        source = self.source("Course/Unknown folder/shared.pdf", b"ambiguous material")
+        imported = self.run_import([source])
+        payload = imported["files"][0]
+        before = payload.stat().st_mtime_ns
+        source.unlink()
+        pending = list_unmatched_buddy_files(self.archive, 42)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["original"], "Course/Unknown folder/shared.pdf")
+        self.assertEqual(pending[0]["path"], payload)
+        result = assign_buddy_files(self.archive, 42, [pending[0]["id"]], "cm:2")
+        self.assertEqual(result["assigned"], 1)
+        self.assertEqual(result["remaining"], 0)
+        self.assertEqual(list_unmatched_buddy_files(self.archive, 42), [])
+        self.assertEqual(payload.read_bytes(), b"ambiguous material")
+        self.assertEqual(payload.stat().st_mtime_ns, before)
+        self.assertEqual(self.payloads(), [payload])
+        self.assertIn("Second activity", result["report_path"].read_text())
+        self.assertIn("shared.pdf", result["note"].read_text())
+        self.assertEqual(result["note"].parent, self.course / "section/02_Activity")
+        snapshot = {p: p.read_bytes() for p in self.course.rglob("*") if p.is_file()}
+        repeated = assign_buddy_files(self.archive, 42, [pending[0]["id"]], "cm:2")
+        self.assertEqual(repeated["assigned"], 0)
+        self.assertEqual(snapshot, {p: p.read_bytes() for p in self.course.rglob("*") if p.is_file()})
+
+    def test_legacy_ledger_without_associations_is_resolved_without_downloads(self):
+        files = [self.source("lecture.pdf", b"known"), self.source("unknown.pdf", b"unknown")]
+        self.run_import(files)
+        ledger_path = self.course / ".archiver/moodle_buddy_imports.json"
+        ledger = json.loads(ledger_path.read_text())
+        for entry in ledger["files"].values():
+            entry.pop("associations", None)
+        ledger_path.write_text(json.dumps(ledger))
+        pending = list_unmatched_buddy_files(self.archive, 42)
+        self.assertEqual([row["name"] for row in pending], ["unknown.pdf"])
+        result = assign_buddy_files(self.archive, 42, [pending[0]["id"]], "cm:1")
+        self.assertEqual(result["remaining"], 0)
+        self.assertEqual(len(self.payloads()), 2)
+
+    def test_reimport_preserves_user_assignment_for_ambiguous_filename(self):
+        source = self.source("shared.pdf", b"shared")
+        self.run_import([source])
+        pending = list_unmatched_buddy_files(self.archive, 42)
+        assign_buddy_files(self.archive, 42, [pending[0]["id"]], "cm:2")
+        repeated = self.run_import([source])
+        self.assertEqual(repeated["new_files"], 0)
+        self.assertEqual(repeated["unmatched"], [])
+        self.assertEqual(repeated["matched"][0]["activity_key"], "cm:2")
+
+    def test_assignment_rollback_preserves_existing_ledger_payloads_and_notes(self):
+        self.use_flat_notes()
+        source = self.source("shared.pdf", b"shared")
+        self.run_import([source])
+        pending = list_unmatched_buddy_files(self.archive, 42)
+        before = {p: p.read_bytes() for p in self.course.rglob("*") if p.is_file()}
+        with patch("ffhs_archiver.extension_import.os.replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                assign_buddy_files(self.archive, 42, [pending[0]["id"]], "cm:1")
+        self.assertEqual(before, {p: p.read_bytes() for p in self.course.rglob("*") if p.is_file()})
+        self.assertFalse((self.course / "section/01_Activity").exists())
+        self.assertEqual(len(list_unmatched_buddy_files(self.archive, 42)), 1)
+
+    def test_stale_foreign_or_modified_assignment_selection_changes_nothing(self):
+        source = self.source("shared.pdf", b"shared")
+        imported = self.run_import([source])
+        pending = list_unmatched_buddy_files(self.archive, 42)
+        before = {p: p.read_bytes() for p in self.course.rglob("*") if p.is_file()}
+        for ids, key in ((["foreign-id"], "cm:1"), ([pending[0]["id"]], "cm:999"), ([], "cm:1")):
+            with self.subTest(ids=ids, key=key), self.assertRaises(ValueError):
+                assign_buddy_files(self.archive, 42, ids, key)
+            self.assertEqual(before, {p: p.read_bytes() for p in self.course.rglob("*") if p.is_file()})
+        imported["files"][0].write_bytes(b"edited by user")
+        with self.assertRaises(ValueError):
+            assign_buddy_files(self.archive, 42, [pending[0]["id"]], "cm:1")
+        self.assertEqual(len(list_unmatched_buddy_files(self.archive, 42)), 1)
+
+    def test_identical_payload_origins_can_be_assigned_independently(self):
+        sources = [self.source("One/shared.pdf", b"same"), self.source("Two/shared.pdf", b"same")]
+        imported = self.run_import(sources)
+        self.assertEqual(len(imported["files"]), 1)
+        self.assertEqual(imported["unmatched_files"], 1)
+        pending = list_unmatched_buddy_files(self.archive, 42)
+        self.assertEqual(len({row["id"] for row in pending}), 2)
+        first = assign_buddy_files(self.archive, 42, [pending[0]["id"]], "cm:1")
+        self.assertEqual(first["remaining"], 1)
+        second = assign_buddy_files(self.archive, 42, [pending[1]["id"]], "cm:2")
+        self.assertEqual(second["remaining"], 0)
+        self.assertEqual(len(self.payloads()), 1)
 
     def test_buddy_explicit_activity_resolves_ambiguous_names_by_user_choice(self):
         files = [self.source("shared.pdf", b"shared material"),

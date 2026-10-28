@@ -184,6 +184,15 @@ class DownloadSession:
         self._previewed = {c.relative_path: c for c in selected}
         return selected
 
+    def mark_imported(self, candidates: Iterable[DownloadCandidate]) -> None:
+        """Exclude only committed selections from later scans in this session.
+
+        Keep their reviewed signatures: if a browser later changes the file,
+        it must appear again. Unselected downloads remain visible for review.
+        """
+        for candidate in candidates:
+            self._baseline[candidate.relative_path] = candidate
+
     def validate_candidates(self, selected: Iterable[DownloadCandidate]) -> list[Path]:
         """Reject replaced/deleted/changed files and anything outside the reviewed session."""
         selected = list(selected)

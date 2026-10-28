@@ -254,7 +254,10 @@ def _import_downloads(sources, archive_root, course_id, download_root=None, *,
                 if original not in previous["origins"]:
                     previous["origins"].append(original)
                 owners = exact.get(parts[-1], set())
-                key = activity_key if activity_key is not None else next(iter(owners)) if len(owners) == 1 else None
+                saved_key = previous.get("associations", {}).get(original)
+                key = (activity_key if activity_key is not None else saved_key if saved_key in activities
+                       else next(iter(owners)) if len(owners) == 1 else None)
+                previous.setdefault("associations", {})[original] = key
                 rows.append({"path": target, "original": original, "sha256": sha,
                              "activity_key": key, "activity_title": activities[key]["title"] if key else ""})
 
@@ -375,4 +378,148 @@ def _result(rows, report, new_count):
     return {"files": files, "report_path": report, "note": report,
             "matched": [row for row in rows if row["activity_key"]],
             "unmatched": [row for row in rows if not row["activity_key"]],
+            "matched_files": len({row["path"] for row in rows if row["activity_key"]}),
+            "unmatched_files": len({row["path"] for row in rows if not row["activity_key"]}),
             "new_files": new_count, "reused_files": len(files) - new_count}
+
+
+def _buddy_records(course, activities, exact, ledger):
+    """Read persisted origin associations, including ledgers from version 0.5."""
+    if ledger.get("version") != 1 or not isinstance(ledger.get("files"), dict):
+        raise ValueError("Registro importazioni non valido: non è stato sovrascritto")
+    records = []
+    for sha, entry in ledger["files"].items():
+        if not isinstance(entry, dict) or not isinstance(entry.get("origins"), list):
+            raise ValueError("Registro importazioni non valido")
+        path = _inside(course, entry.get("path", ""))
+        if not path.is_file():
+            raise ValueError("Una copia importata non è più disponibile nell'archivio")
+        associations = entry.get("associations", {})
+        if not isinstance(associations, dict):
+            raise ValueError("Associazioni nel registro non valide")
+        for original in dict.fromkeys(entry["origins"]):
+            parts = _relative_parts(original)
+            owners = exact.get(parts[-1], set())
+            key = associations.get(original)
+            if original not in associations:
+                key = next(iter(owners)) if len(owners) == 1 else None
+            if key not in activities:
+                key = None
+            item_id = hashlib.sha256((sha + "\0" + original).encode("utf-8")).hexdigest()
+            records.append({"id": item_id, "path": path, "original": original,
+                            "name": parts[-1], "sha256": sha, "activity_key": key})
+    return records
+
+
+def list_unmatched_buddy_files(archive_root, course_id) -> list[dict]:
+    """List already archived origins awaiting an activity; no downloads required.
+
+    The stable id identifies both content and original context. Multiple origins
+    can share one deduplicated local file and be assigned independently.
+    """
+    root = _archive_root(archive_root)
+    course, activities, exact = _course_data(root, course_id)
+    if not (course / LEDGER).exists():
+        return []
+    records = _buddy_records(course, activities, exact, _read_json(course, LEDGER))
+    return [record for record in records if not record["activity_key"]]
+
+
+def assign_buddy_files(archive_root, course_id, item_ids, activity_key) -> dict:
+    """Link already imported Moodle Buddy files to a chosen activity in place.
+
+    Original downloads and local payloads are never copied, renamed or removed.
+    New notes/report are published before the atomic ledger commit and rolled
+    back if it fails. Existing reports remain historical snapshots.
+    """
+    root = _archive_root(archive_root)
+    course, activities, exact = _course_data(root, course_id)
+    if activity_key not in activities:
+        raise ValueError("Scegli un'attività del corso come destinazione")
+    ledger = _read_json(course, LEDGER)
+    records = _buddy_records(course, activities, exact, ledger)
+    ids = set(item_ids)
+    if not ids:
+        raise ValueError("Seleziona almeno un file da associare")
+    available = {record["id"]: record for record in records}
+    if not ids.issubset(available):
+        raise ValueError("L'elenco dei file è cambiato: aggiornalo prima di associare")
+    selected = [available[item_id] for item_id in sorted(ids)]
+    # Verify selected archived bytes, rather than trusting stale preview data.
+    hashes = {}
+    for record in selected:
+        path = record["path"]
+        if path not in hashes:
+            hashes[path] = _hash_file(path)
+        if hashes[path] != record["sha256"]:
+            raise ValueError("Una copia importata è stata modificata: non è stata associata")
+    changed = [record for record in selected if record["activity_key"] != activity_key]
+    for record in selected:
+        record["activity_key"] = activity_key
+        ledger["files"][record["sha256"]].setdefault("associations", {})[record["original"]] = activity_key
+    fingerprint = hashlib.sha256(json.dumps(sorted(
+        (record["id"], record["activity_key"] or "") for record in records)).encode()).hexdigest()
+    report_key = "associations:" + fingerprint
+    previous_report = ledger.get("reports", {}).get(report_key)
+    if not changed and previous_report:
+        report = _inside(course, previous_report)
+        if report.is_file():
+            return {"assigned": 0, "remaining": sum(not r["activity_key"] for r in records),
+                    "report_path": report, "note": report,
+                    "files": list(dict.fromkeys(r["path"] for r in selected))}
+
+    created_dirs, created_files = [], []
+    try:
+        folder, made = _directory(course, "materiali_moodle_buddy")
+        created_dirs.extend(made)
+        names = UniqueNames()
+        for file in folder.iterdir():
+            names.reserve(file.name)
+        report = folder / names.take("associazioni_moodle_buddy.md")
+        report_relative = report.relative_to(course).as_posix()
+        lines = ["---", "title: Associazioni Moodle Buddy", "type: manual", "---", "",
+                 "# Associazioni Moodle Buddy", "",
+                 "Stato degli abbinamenti al momento della conferma. Le copie locali e gli originali sono conservati.", "",
+                 "| Percorso originale | Copia locale | Attività |", "| --- | --- | --- |"]
+        for record in records:
+            activity = activities.get(record["activity_key"])
+            activity_link = (f"[{_cell(activity['title'])}]({rel_link(report_relative, activity['md'].relative_to(course).as_posix())})"
+                             if activity else "Da associare")
+            file_link = rel_link(report_relative, record["path"].relative_to(course).as_posix())
+            lines.append(f"| {_cell(record['original'])} | [Apri file]({file_link}) | {activity_link} |")
+        with report.open("x", encoding="utf-8") as handle:
+            created_files.append(report)
+            handle.write("\n".join(lines) + "\n")
+        activity = activities[activity_key]
+        if _prepare_activity_folder(activity):
+            created_dirs.append(activity["directory"])
+        note_names = UniqueNames()
+        for file in activity["directory"].iterdir():
+            note_names.reserve(file.name)
+        note = activity["directory"] / note_names.take("materiali_moodle_buddy_assegnati.md")
+        relative_note = note.relative_to(course).as_posix()
+        content = ["---", "title: Materiali Moodle Buddy assegnati", "type: manual", "---", "",
+                   "# Materiali Moodle Buddy", "", "Attività scelta esplicitamente dall'utente.", ""]
+        content += [f"- [{escape_md(record['name'])}]({rel_link(relative_note, record['path'].relative_to(course).as_posix())})"
+                    for record in selected]
+        with note.open("x", encoding="utf-8") as handle:
+            created_files.append(note)
+            handle.write("\n".join(content) + "\n")
+        ledger.setdefault("reports", {})[report_key] = report_relative
+        with tempfile.TemporaryDirectory(prefix=".buddy-assign-", dir=course) as temporary:
+            staged = Path(temporary) / "ledger.json"
+            staged.write_text(json.dumps(ledger, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(staged, _inside(course, LEDGER))
+        return {"assigned": len(changed), "remaining": sum(not r["activity_key"] for r in records),
+                "report_path": report, "note": note,
+                "files": list(dict.fromkeys(r["path"] for r in selected))}
+    except BaseException:
+        for file in reversed(created_files):
+            file.unlink(missing_ok=True)
+        raise
+    finally:
+        for directory in reversed(created_dirs):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
