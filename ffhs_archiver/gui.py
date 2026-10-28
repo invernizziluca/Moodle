@@ -24,6 +24,7 @@ from .session import Session
 from .sso import SSOError
 from .state import ArchiveIndex
 from .extension_dialog import open_extension_dialog
+from .study_dialog import open_study_dialog
 
 log = logging.getLogger(__name__)
 
@@ -335,9 +336,11 @@ class App:
                              "esattamente quanto c'era prima. Senza questa opzione il registro non viene toccato e "
                              "copi il link a mano.",
                   style="Muted.TLabel", wraplength=660, justify="left").grid(row=7, column=0, sticky="w", padx=(22, 0))
-        ttk.Label(card, text="Dopo l'accesso, usa «Documenti con Moodle Buddy» e «Video con FetchV» "
-                             "per raccogliere nell'archivio i download delle estensioni già installate nel browser.",
+        ttk.Label(card, text="Metti i download di Moodle-DL, Moodle Buddy e FetchV nella cartella del corso, "
+                             "poi usa «Prepara corso per AI». Puoi lavorare anche senza login.",
                   style="Muted.TLabel", wraplength=660, justify="left").grid(row=9, column=0, sticky="w", pady=(6, 0))
+        ttk.Button(card, text="Prepara download locali per AI (senza login)",
+                   command=lambda: open_study_dialog(self)).grid(row=10, column=0, sticky="w", pady=10)
         self.login_status = ttk.Label(card, text="", wraplength=660, justify="left")
         self.login_status.grid(row=8, column=0, sticky="w", pady=(8, 0))
         self.wait_frame = ttk.Frame(card)
@@ -478,19 +481,18 @@ class App:
         actions = ttk.Frame(side)
         actions.grid(row=4 + len(options), column=0, sticky="ew", pady=(12, 0))
         actions.columnconfigure(0, weight=1)
-        ttk.Button(actions, text="Documenti con Moodle Buddy…",
-                   command=lambda: open_extension_dialog(self, "moodle_buddy")).grid(row=0, column=0, sticky="ew")
-        ttk.Button(actions, text="Video con FetchV…",
-                   command=lambda: open_extension_dialog(self, "fetchv")).grid(row=1, column=0, sticky="ew", pady=(5, 8))
-        self.btn_export = self._accent_button(actions, "Esporta struttura, testi e file API", lambda: self._export(False),
-                                              big=True)
+        ttk.Label(actions, text="Metti i download nella cartella del corso, poi prepara il pacchetto per AI.",
+                  wraplength=300).grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(actions, text="Cartella materiali e preparazione AI…",
+                   command=lambda: open_study_dialog(self)).grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self.btn_export = self._accent_button(actions, "Prepara corso per AI", lambda: open_study_dialog(self), big=True)
         self.btn_export.grid(row=2, column=0, sticky="ew")
-        self.btn_export_all = ttk.Button(actions, text="Esporta tutti i corsi", command=lambda: self._export(True))
+        self.btn_export_all = ttk.Button(actions, text="Esportazione API avanzata…", command=lambda: self._export(False))
         self.btn_export_all.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         self.btn_cancel = ttk.Button(actions, text="Interrompi", command=self._cancel_export, state="disabled")
         self.btn_cancel.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        hint = ttk.Label(side, text="La prima volta scarica tutto; poi solo novità e modifiche. Se interrompi, "
-                                    "la prossima esportazione riprende da dove si era fermata.",
+        hint = ttk.Label(side, text="Originali conservati. Il pacchetto AI contiene indice, materiali unici e testi Moodle. "
+                                    "Video inclusi senza trascrizione automatica.",
                          style="Muted.TLabel", wraplength=300, justify="left")
         hint.grid(row=5 + len(options), column=0, sticky="ew", pady=(10, 0))
         side.bind("<Configure>", lambda e: hint.configure(wraplength=max(160, e.width - 30)))

@@ -1,113 +1,29 @@
-# FFHS Moodle Archiver 0.5.1 — guida
+# FFHS Moodle Archiver 0.6 — cartella per AI
 
-Il flusso principale usa le **vere estensioni Moodle Buddy e FetchV** installate nel tuo browser.
-Il programma esporta struttura e testi del corso, poi organizza i download delle estensioni.
-Serve Windows con Python 3.10 o successivo e Tk. Non occorrono pacchetti pip.
+1. Estrai l'app in una cartella nuova e breve, ad esempio C:\FFHS. Serve Python 3.10+ con Tk, nessun pacchetto pip.
+2. Avvia «Avvia FFHS Moodle Archiver.bat».
+3. Per aggiungere testi Moodle, accedi ed evidenzia un corso. Puoi anche usare «Prepara download locali per AI (senza login)».
+4. Premi «Prepara corso per AI», poi «Apri cartella dove mettere i download».
+5. Copia in questa cartella quello che scarichi con Moodle-DL, Moodle Buddy, FetchV o altri strumenti. Sottocartelle libere; una cartella per corso. Puoi scegliere anche una cartella di download già esistente.
+6. Premi **PREPARA PER AI**. Il programma apre il risultato.
 
-## Installazione e accesso
+## Cosa dare all'AI
 
-Estrai tutto in una cartella nuova e breve, per esempio `C:\FFHS`. Non avviare l'app dentro lo ZIP
-e non estrarla sopra una vecchia installazione incompleta. Apri `FFHS Moodle Archiver.pyw`; se si
-apre un editor, usa `Avvia FFHS Moodle Archiver.bat`. Il campione storico non serve per l'avvio.
+Accanto alla cartella di ingresso vengono creati `<nome>_PRONTO_AI` e `<nome>_PRONTO_AI.zip`.
+La cartella contiene INIZIA_QUI.md, MATERIALI, il catalogo delle fonti, istruzioni suggerite per l'AI e, se richiesti, TESTI_MOODLE.md.
+Usa la cartella intera o lo ZIP se il servizio li supporta; altrimenti carica i file al suo interno. Dimensioni, formati e numero di fonti dipendono dal servizio AI: non esiste un pacchetto accettato senza limiti da qualsiasi AI.
 
-L'accesso salvato resta nella cartella del tuo utente Windows ed è protetto con DPAPI.
-La versione mantiene le impostazioni precedenti e il normale login FFHS-ID/MFA. Per il nuovo
-flusso non occorre conservare il token privato di auto-login video. La verifica ordinaria non
-esegue il probe Kaltura che poteva causare il cooldown di sei minuti; quelle opzioni vengono
-disattivate nella migrazione delle vecchie impostazioni.
+PDF, documenti, slide, testi, immagini, sottotitoli, audio e video vengono copiati. I file identici sono presenti una sola volta, conservando i percorsi di provenienza nel catalogo. File tecnici come JSON di configurazione, cache e download incompleti non sono inclusi: gli esclusi sono elencati nell'indice.
+I file ZIP nei download vengono conservati senza estrazione: estraili prima nella cartella d'ingresso per ottenere documenti direttamente leggibili dall'AI. I video restano file originali: non vengono trascritti automaticamente. Usa audio/trascrizioni o un servizio in grado di elaborare i video. L'indice segnala questi casi.
 
-## Documenti con Moodle Buddy
+## Originali e aggiornamenti
 
-1. Accedi nell'app e **evidenzia un corso** con un clic sul nome.
-2. Premi **Documenti con Moodle Buddy…**. Se manca la struttura locale, l'app la prepara con testi
-   e metadati API, senza scaricare i materiali o chiedere auto-login video.
-3. Scegli la cartella in cui il browser salva i download. Sono controllate anche le sottocartelle.
-4. Premi **1 · Apri Moodle**. Nella pagina del corso usa l'icona dell'estensione vera.
-5. Attendi la fine dei download in `Ctrl+J`, torna all'app e premi **2 · Cerca download**.
-6. Controlla la selezione, deseleziona eventuali file estranei e premi **3 · Importa selezionati**.
+I download originali non vengono spostati o cancellati. Aggiungi nuovi materiali e premi nuovamente PREPARA PER AI. Il pacchetto generato viene ricostruito, evitando copie identiche. Non modificare i file dentro PRONTO_AI: le tue aggiunte vanno nella cartella d'ingresso, altrimenti saranno sostituite dalla preparazione successiva.
+L'app rifiuta di sostituire una cartella preesistente che non riconosce come proprio pacchetto. Un errore di preparazione conserva il pacchetto precedente.
 
-Moodle Buddy può produrre file singoli in una gerarchia corso/sezione e ZIP delle cartelle Moodle.
-L'app copia entrambi, estrae gli ZIP sicuri e accorcia i nomi locali quando necessario, conservando
-i percorsi originali nel rapporto. Gli originali del browser non vengono spostati né cancellati.
+## Moodle è opzionale
 
-L'associazione automatica richiede un nome esatto presente in **una sola attività** nei metadati.
-Nomi ambigui, nomi cambiati dal browser come `lezione (1).pdf` e file non esposti dalle API restano
-**Da associare**. La scheda **File da collegare** si apre nella stessa finestra: seleziona uno o più
-file, scegli l'attività e premi **Collega selezionati**. Nessun file viene ricopiato o riscaricato.
-Puoi chiudere e riprendere in seguito: la scheda recupera anche le importazioni fatte con la 0.5.
-La scelta resta salvata e viene rispettata nelle importazioni successive dello stesso file e percorso.
+Con un corso evidenziato e una sessione valida puoi aggiungere struttura e testi Moodle. Non vengono riscaricati documenti o video, né richiesto auto-login Kaltura. Forum, consegne e revisioni dei quiz sono esclusi da questo flusso di studio. Se usi soltanto Moodle-DL puoi lavorare senza login.
+Le vecchie funzioni di esportazione e importazione delle estensioni restano accessibili come funzioni avanzate. I vecchi archivi non vengono migrati o cancellati automaticamente.
 
-I file con lo stesso contenuto vengono conservati in una sola copia, anche se presenti più volte nei
-download. Per questo il numero dei **file conservati** può essere diverso dal numero dei **collegamenti
-da scegliere**, che distingue i percorsi originali. Il vecchio messaggio mescolava questi conteggi.
-I registri 0.5 non salvavano le assegnazioni manuali: in quei casi può servire una conferma una volta.
-
-## Video con FetchV
-
-1. Evidenzia il corso e premi **Video con FetchV…**.
-2. Scegli l'attività del video, la cartella Download e il browser in cui hai FetchV.
-3. Premi **1 · Apri Moodle**. Avvia il video nella pagina reale e scaricalo con FetchV.
-4. Attendi il file finale in `Ctrl+J` (per esempio MP4), non un segmento o un file temporaneo.
-5. Torna nell'app, cerca i nuovi file, controlla la selezione e importa.
-
-Il video viene copiato nella cartella allegati dell'attività scelta e collegato da una nota.
-Ripetere l'importazione dello stesso contenuto nella stessa attività riusa la copia già presente.
-Non serve l'estensione personalizzata proposta nella 0.4: puoi rimuoverla dal browser.
-
-**YouTube resta un link.** L'app non propone FetchV per un'attività identificata come solo YouTube.
-L'origine di un file locale non è deducibile con certezza dal nome: controlla tu i file selezionati.
-I limiti del player, dei permessi, del DRM e delle estensioni rimangono quelli dei servizi usati.
-
-## File già scaricati
-
-Usa **File già scaricati…** per scegliere file completati nella cartella Download indicata.
-Non devi scaricare di nuovo materiali già sul PC. Un file cambiato tra l'anteprima e l'importazione
-viene rifiutato: attendi la fine e aggiorna l'elenco.
-
-Il programma non legge profili o cronologie del browser. La ricerca confronta la cartella scelta
-prima e dopo il download: non dimostra da quale estensione provenga ogni file. Per questo la
-selezione viene mostrata prima di importare. Una cartella troppo grande viene segnalata esplicitamente.
-
-## Dove trovi il materiale
-
-Il layout della versione allegata è mantenuto: nomi leggibili, sezioni come cartelle, note delle
-attività nella sezione e allegati nella cartella omonima. È compatibile anche con il vecchio layout
-che teneva nota e allegati nella stessa cartella dell'attività.
-
-- La pagina iniziale e `course_overview.md` collegano **`download_estensioni.md`**.
-- Questo indice mostra rapporti e copie importate da Moodle Buddy e FetchV.
-- Ogni rapporto distingue file associati e **Da associare** e collega i file veri.
-- Le attività associate hanno note `materiali_moodle_buddy.md` o `materiali_fetchv.md` accanto agli allegati.
-- Struttura JSON, testi e collegamenti originali Moodle rimangono disponibili per Obsidian e lo studio.
-- `elementi_mancanti.md` descrive gli esiti dell'esportatore API: per le copie delle estensioni consulta
-  anche `download_estensioni.md`. Un import non certifica la completezza dell'intero corso.
-
-Il pulsante **Esporta struttura, testi e file API** mantiene anche l'esportatore normale. Le funzioni
-avanzate di auto-login/cattura della base allegata restano opzionali per la CLI, disattivate nel flusso
-grafico con estensioni. Non sono necessarie per l'alternativa 1.
-
-## Problemi frequenti
-
-| Situazione | Cosa fare |
-| --- | --- |
-| Estensioni non consentite in edge://newtab | Apri la pagina Moodle con l'app e clicca l'estensione in quella scheda. |
-| Elenco vuoto | Controlla la cartella effettiva e usa File già scaricati per quelli precedenti alla sessione. |
-| Troppi file nella cartella | Scegli una sottocartella usata dall'estensione. La lista non viene troncata in silenzio. |
-| Download ancora in corso | Aspetta la fine in Ctrl+J e aggiorna l'elenco. |
-| File Da associare | Nella scheda File da collegare seleziona i file, scegli l'attività e premi Collega selezionati. |
-| Account scaduto | Accedi nell'app per le API e nel browser per le estensioni. |
-| Vecchio campione troppo lungo da estrarre | È facoltativo; usa il pacchetto dell'app con percorsi brevi. |
-
-## Estensioni ufficiali e verifica
-
-Le estensioni restano separate e vengono installate dai loro store. Non espongono un comando pubblico
-verificato per avviare il download da Python: i clic nell'estensione restano a carico dell'utente,
-come previsto dall'alternativa 1. Nessun codice FetchV è incorporato o ridistribuito.
-
-FetchV Edge: https://microsoftedge.microsoft.com/addons/detail/dbepbhhcmhodojepbagfppgpieeplpik
-
-Moodle Buddy: https://chromewebstore.google.com/detail/nomahjpllnbcpbggnpiehiecfbjmcaeo
-
-I test verificano byte, ZIP, associazioni, deduplica, link e preparazione senza auto-login. La GUI è
-stata provata su display Linux con copie reali e un MP4 riproducibile; l'apertura del browser era
-simulata. Il login Windows/FFHS e i download delle tue estensioni vanno provati sul tuo PC.
+Il programma prepara le fonti, non genera riassunti e non carica dati online su servizi AI. Le fonti possono essere incomplete: il pacchetto non certifica che tutto Moodle sia stato scaricato. Chiedi all'AI di citare documento/pagina o minuto e di segnalare materiali non leggibili.
