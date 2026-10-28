@@ -1,5 +1,8 @@
 # Versione 0.4 — percorsi brevi, file e video dei player Moodle
 
+Note storiche: nella 0.5 l'assistente personalizzato e il relativo flusso HLS sono stati
+sostituiti dalle estensioni reali. Segui [Novità 0.5](NOVITA_0.5.md) e la guida corrente.
+
 ## Installazione senza l'errore di estrazione
 
 Il messaggio `0x80010135: Percorso troppo lungo` era causato dalle cartelle profonde del campione

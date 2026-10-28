@@ -21,7 +21,6 @@ def package_files(root: Path) -> list[Path]:
     files = [root / "LEGGIMI.md", root / "FFHS Moodle Archiver.pyw",
              root / "Avvia FFHS Moodle Archiver.bat"]
     files.extend(p for p in (root / "ffhs_archiver").rglob("*") if p.is_file())
-    files.extend(p for p in (root / "browser_helper").rglob("*") if p.is_file())
     files.extend((root / "docs").glob("*.md"))
     selected = []
     for file in files:

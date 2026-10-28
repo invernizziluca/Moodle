@@ -9,8 +9,8 @@ from urllib.parse import unquote
 
 LINK = re.compile(r"!?\[[^\]\n]*\]\(([^)\s]+)\)")
 REQUIRED = ["course_overview.md", "course_fulltext.md", "course_info.md", "course_structure.json", "verifica_corso.md",
-            "elementi_mancanti.md"]
-OPTIONAL_REPORTS = ["video_e_media.md"]  # older archives do not contain this report
+            "elementi_mancanti.md", "file_del_corso.md"]
+OPTIONAL_REPORTS = ["video_e_media.md"]
 
 
 def main(root: Path) -> int:
@@ -35,7 +35,7 @@ def main(root: Path) -> int:
         problems.append(f"leftover partial file: {leftover}")
     courses = json.loads((root / "courses.json").read_text(encoding="utf-8"))["courses"]
     for c in courses:
-        for name in REQUIRED:
+        for name in REQUIRED + [f"{c['folder']}.md"]:  # incl. the course home / folder note
             if not (root / c["folder"] / name).exists():
                 problems.append(f"missing {name} in {c['folder']}")
         json.loads((root / c["folder"] / "course_structure.json").read_text(encoding="utf-8"))

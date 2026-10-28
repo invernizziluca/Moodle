@@ -129,11 +129,14 @@ class Session:
         if self.attempt and not self.attempt.expired:
             webbrowser.open(self.attempt.url)
 
-    def finish_login(self, text: str, require_signature: bool = True) -> tuple:
+    def finish_login(self, text: str, require_signature: bool = True, keep_private_token: bool = False) -> tuple:
         """Verify the link (signature = this attempt's passport) or a pasted key; then store the token.
 
         ``require_signature``: links arriving from the browser must be signed; a bare 32-character key is
         accepted only when the user pastes it explicitly.
+        ``keep_private_token``: store the Moodle private token too (encrypted, with the rest). Set only when the
+        user opts into the advanced features — the private token opens an official app web session used to
+        download the lecture videos and to capture login-only pages (e.g. the Modulplan). Otherwise discarded.
         """
         attempt = self.attempt
         if attempt is not None and attempt.expired:
@@ -162,7 +165,8 @@ class Session:
             raise SSOError("Il token appartiene a un altro sito Moodle: rifiutato.")
         creds = Credentials(site=site, token=result.token, userid=int(info.get("userid") or 0),
                             fullname=info.get("fullname", ""), username=info.get("username", ""),
-                            sitename=info.get("sitename", ""), release=info.get("release", ""))
+                            sitename=info.get("sitename", ""), release=info.get("release", ""),
+                            privatetoken=result.private_token if keep_private_token else "")
         try:
             creds.protection = self.store.save(creds)
         except OSError as exc:  # e.g. DPAPI unavailable: keep the token for this session only

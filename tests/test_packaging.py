@@ -37,7 +37,7 @@ class PackagingTests(unittest.TestCase):
             packager.build_package(ROOT, b)
             self.assertEqual(hashlib.sha256(a.read_bytes()).digest(), hashlib.sha256(b.read_bytes()).digest())
 
-    def test_browser_helper_is_packaged_without_tests_or_cache(self):
+    def test_obsolete_custom_extension_is_not_packaged(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "source"
             for path in ("ffhs_archiver/__init__.py", "LEGGIMI.md", "FFHS Moodle Archiver.pyw",
@@ -48,8 +48,7 @@ class PackagingTests(unittest.TestCase):
                 file.parent.mkdir(parents=True, exist_ok=True)
                 file.write_text("fixture")
             members = packager.build_package(root, Path(tmp) / "dist.zip")
-            self.assertIn("FFHS_Archiver/browser_helper/manifest.json", members)
-            self.assertIn("FFHS_Archiver/browser_helper/popup.js", members)
+            self.assertFalse(any("browser_helper" in name for name in members))
             self.assertFalse(any("/tests/" in name or "__pycache__" in name for name in members))
 
     def test_historical_example_is_preserved_without_long_checkout_paths(self):

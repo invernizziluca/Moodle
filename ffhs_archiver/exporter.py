@@ -8,8 +8,6 @@ import logging
 import os
 import posixpath
 import re
-import shutil
-import tempfile
 import threading
 import time
 import traceback
@@ -21,13 +19,14 @@ from collections.abc import Callable
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from . import __version__, fsutil
-from .html2md import (Converter, classify_media_url, escape_md, html_to_text, is_audio_filename,
-                      is_video_filename, md_url, quiz_question_to_markdown, shift_headings, unescape_name)
-from .moodle import CancelledError, MoodleClient, MoodleError, NetworkError, TokenInvalidError
-from .naming import UniqueNames, human_size, rel_link, safe_filename, slug
+from .html2md import (Converter, classify_media_url, escape_md, extract_region_main, html_to_text,
+                      is_audio_filename, is_video_filename, md_url, quiz_question_to_markdown, shift_headings,
+                      unescape_name)
+from .kaltura import KalturaClient, parse_kaltura
+from .moodle import CancelledError, MoodleClient, MoodleError, NetworkError, TokenInvalidError, VideoSession
+from .naming import UniqueNames, human_size, readable, rel_link, safe_filename, slug, strip_section_number
 from .privacy import Pseudonymizer, scrub_secrets
 from .state import STATE_DIR, ArchiveIndex, CourseState
-from .hls import download_hls
 
 log = logging.getLogger(__name__)
 
@@ -108,8 +107,7 @@ LINK_ONLY_NOTES = {
     "feedback": "Questionario: le domande si vedono solo compilandolo in Moodle.",
     "survey": "Questionario: le domande si vedono solo compilandolo in Moodle.",
     "chat": "Chat: le sessioni non vengono esportate.",
-    "kalvidres": "Player Kaltura: questa versione conserva il link; verifica nel player "
-                 "se è disponibile un download ufficiale.",
+    "kalvidres": "Video Kaltura: usa FetchV nel browser e raccogli il download nell'archivio.",
     "kalvidassign": "Consegna video Kaltura: si gestisce in Moodle.",
     "mumie": "Esercizi MUMIE: si aprono da Moodle sulla piattaforma MUMIE.",
     "turnitintooltwo": "Consegna Turnitin: istruzioni esportate, consegna e rapporti restano in Moodle.",
@@ -123,16 +121,18 @@ LINK_ONLY_NOTES = {
 MANUAL_TIP = ("Per conservarne il contenuto: aprilo in Moodle e salva la pagina come PDF (Ctrl+P → «Salva come "
               "PDF») nella cartella di questa attività. Alla prossima esportazione il file verrà collegato qui, "
               "nella panoramica e nel testo completo.")
-VIDEO_TIP = ("Il download automatico gestisce i file Moodle e gli HLS VOD supportati sullo stesso sito. "
-             "Per Kaltura/SWITCHcast usa il pulsante «Video Kaltura / browser» nell'app: "
-             "l'assistente rileva file e HLS nella tua sessione del browser. YouTube resta un link. "
-             "Puoi importare file o intere cartelle HLS nell'attività. Le aggiunte manuali "
-             "verranno collegate automaticamente, senza essere considerate una verifica di completezza.")
+VIDEO_TIP = ("Usa il pulsante «Video con FetchV» nell'app, scarica con l'estensione già installata "
+             "e poi raccogli il file nella relativa attività. YouTube resta un link. "
+             "La presenza di una copia locale richiede comunque la verifica del contenuto.")
 VIDEO_MODS = {"kalvidres", "kalvidassign", "bigbluebuttonbn", "zoom"}
 MISSING_GROUPS = (
     ("interattivo", "Contenuti interattivi (H5P, lezioni, SCORM, strumenti esterni, questionari)",
      "Si usano solo dentro Moodle. " + MANUAL_TIP.replace("di questa attività", "dell'attività")),
-    ("video", "Video/audio rimasti online e aule virtuali", VIDEO_TIP.replace("di questa attività", "dell'attività")),
+    ("video", "Video in streaming e aule virtuali", VIDEO_TIP.replace("di questa attività", "dell'attività")),
+    ("esterno", "Letture e risorse esterne (libri, articoli, biblioteca)",
+     "Si aprono dal link: biblioteca virtuale FFHS, articoli, banche dati, siti. Non sono file che "
+     "Moodle mette a disposizione, quindi non finiscono nell'archivio. Aprili dal link quando ti servono; "
+     "se scarichi un PDF dalla biblioteca, salvalo nella cartella dell'attività e verrà collegato qui."),
     ("quiz", "Quiz senza revisione disponibile",
      "Il programma non avvia tentativi e non recupera risposte nascoste: se svolgi il quiz in Moodle e il docente "
      "permette la revisione, la prossima esportazione la salverà."),
@@ -140,14 +140,21 @@ MISSING_GROUPS = (
      "Diventeranno esportabili quando Moodle li renderà visibili al tuo account (date, condizioni)."),
     ("errore", "Download non riusciti", "Riprova l'esportazione; se l'errore resta, apri il link in Moodle."),
     ("impostazioni", "Esclusi dalle impostazioni", "Attiva l'opzione corrispondente e riesporta."),
-    ("collegamento", "Contenuti conservati solo come link",
-     "Apri il link originale: il contenuto della destinazione non è stato verificato né copiato offline."),
     ("altro", "Altri elementi", "Aprili in Moodle tramite il link."),
 )
 
 MEDIA_DIR = "_media"
+
+# Custom FFHS/Moodle module types that expose no content through the web service but render a readable
+# page we can save by opening it as the signed-in user (the autologin web session). The Modulplan
+# (ffhssyllabus) is the important one: it lists the course literature/books, learning goals and study
+# times. Captured only when advanced features (the private token) are on; otherwise the page is flagged.
+CAPTURE_MODS = {"ffhssyllabus"}
+CAPTURE_TIP = ("Questa pagina (p. es. il Modulplan con letture, obiettivi e tempi di studio) si apre solo "
+               "dentro Moodle. Attiva «Scarica i video e cattura le pagine del corso» al prossimo accesso e "
+               "il suo contenuto verrà salvato qui automaticamente.")
 VERSIONS_DIR = "_versioni_precedenti"
-PH_RE = re.compile(r"@@(FILE|ITEM|PATH):([^@\s)]+)@@")
+PH_RE = re.compile(r"@@(FILE|ITEM|PATH|DOC):([^@\s)]+)@@")
 
 
 def fmt_dt(ts: Any) -> str:
@@ -215,11 +222,16 @@ class ExportOptions:
     include_forums: bool = True
     include_quiz_reviews: bool = True
     include_submissions: bool = True
-    include_videos: bool = True
+    include_videos: bool = True       # download video *files* Moodle serves (e.g. an MP4 in a folder)
+    download_videos: bool = False     # also fetch *streamed* FFHS videos (Kaltura/SWITCHcast) for offline study
+    capture_pages: bool = False       # optional advanced capture; disabled in the extensions workflow
+    download_files: bool = True       # false prepares structure/texts for subsequent browser downloads
+    private_token: str = ""           # needed to open the video/pages platform as the user; empty unless on
     max_file_mb: int = 0
     keep_versions: bool = True
     save_raw_json: bool = False
     anonymize_others: bool = True
+    obsidian_ready: bool = True       # write a minimal .obsidian config so the archive opens as a vault
     max_forum_discussions: int = 500
 
 
@@ -238,10 +250,15 @@ class FileSpec:
     index: int = -1
     status: str = "pending"  # pending | new | updated | unchanged | skipped | error
     message: str = ""
+    kaltura: Any = None  # a kaltura.KalturaRef when this is a streamed FFHS video, else None
 
     @property
     def local_ok(self) -> bool:
         return self.status in ("new", "updated", "unchanged")
+
+    @property
+    def is_video_stream(self) -> bool:
+        return self.kaltura is not None
 
 
 @dataclass
@@ -301,6 +318,47 @@ class Exporter:
         self._emit = emit or (lambda event: None)
         self.cancel_event = cancel_event or client.cancel_event
         client.cancel_event = self.cancel_event
+        self._web_built = False
+        self._web_session: VideoSession | None = None
+        self.web_reason = ""
+        self._video_built = False
+        self._video_client: KalturaClient | None = None
+        self.video_reason = ""
+
+    def web_session(self) -> VideoSession | None:
+        """One autologin web session for the whole run, shared by the video download and the login-only
+        page capture (e.g. the Modulplan). None — with ``web_reason`` — when the private token is not
+        available or the platform could not be opened. This is the user's own official app autologin."""
+        if self._web_built:
+            return self._web_session
+        self._web_built = True
+        if not self.options.private_token:
+            self.web_reason = ("per scaricare i video o catturare le pagine del corso (p. es. il Modulplan) "
+                               "accedi di nuovo con l'opzione «Scarica i video e cattura le pagine» attiva")
+            return None
+        session = VideoSession(self.client, self.options.private_token)
+        if not session.ensure_session():
+            self.web_reason = session.reason or "accesso alla piattaforma non riuscito"
+            self.log(self.web_reason, "warning")
+            return None
+        self._web_session = session
+        return session
+
+    def video_client(self) -> KalturaClient | None:
+        """A shared Kaltura client (one autologin for the whole run), or None if video download is
+        off or the web session could not be opened. ``video_reason`` explains a None."""
+        if self._video_built:
+            return self._video_client
+        self._video_built = True
+        if not self.options.download_videos:
+            self.video_reason = "download dei video non attivo"
+            return None
+        session = self.web_session()
+        if session is None:
+            self.video_reason = self.web_reason
+            return None
+        self._video_client = KalturaClient(session)
+        return self._video_client
 
     def emit(self, type_: str, **data: Any) -> None:
         data["type"] = type_
@@ -325,14 +383,33 @@ class Exporter:
         courses.sort(key=lambda c: (-(c.get("startdate") or 0), c.get("fullname", "").lower()))
         return courses
 
+    _ADMIN_TOKEN_RE = re.compile(r"^(?:[A-Z]{2,}-[A-Z0-9]-[A-Z0-9]+|(?:OL|ZH|OU|BE)-[\w-]+|[HF]S\d|PVA)", re.I)
+
+    @classmethod
+    def _course_folder_name(cls, fullname: str, shortname: str, cid: int) -> str:
+        """A readable top folder: 'BWL8 — Decision Making and Change Management' from the long FFHS name."""
+        parts = [p.strip() for p in (fullname or "").split(",") if p.strip()]
+        keep = []
+        for p in parts:
+            if cls._ADMIN_TOKEN_RE.match(p):
+                break
+            keep.append(p)
+        if len(keep) >= 2:
+            label = f"{keep[0]} — {', '.join(keep[1:])}"
+        elif keep:
+            label = keep[0]
+        else:
+            label = fullname or shortname or f"Kurs {cid}"
+        return readable(label, 70) or readable(shortname or f"Kurs {cid}", 40)
+
     def _folder_for(self, course: dict, index: ArchiveIndex) -> str:
         cid = int(course["id"])
         existing = index.folder_for(cid)
         if existing:
             return existing
-        base = slug(course.get("fullname") or course.get("shortname") or f"Kurs_{cid}", 40)
+        base = self._course_folder_name(course.get("fullname") or "", course.get("shortname") or "", cid)
         used = index.used_folders()
-        folder = base if base.lower() not in used else f"{base}_{cid}"
+        folder = base if base.lower() not in used else f"{base} ({cid})"
         return folder
 
     def export(self, courses: list) -> dict:
@@ -391,16 +468,44 @@ class Exporter:
             if stop_reason:
                 break
         report = self._write_report(dest, results, started, stop_reason)
+        if self.options.obsidian_ready:
+            self._prepare_obsidian_vault(dest)
         summary = {"results": results, "stopped": stop_reason, "report": report, "auth_error": auth_error,
                    "duration": time.time() - started}
         self.emit("done", summary=summary)
         return summary
 
     @staticmethod
+    def _prepare_obsidian_vault(dest: Path) -> None:
+        """Make the archive folder open cleanly as an Obsidian vault, without touching an existing config."""
+        vault = dest / ".obsidian"
+        if fsutil.exists(vault):
+            return  # never overwrite the user's own Obsidian settings
+        try:
+            fsutil.ensure_dir(vault)
+            fsutil.write_text_atomic(vault / "app.json", json.dumps({
+                "alwaysUpdateLinks": True, "newLinkFormat": "relative", "useMarkdownLinks": True,
+                "attachmentFolderPath": "./", "showUnsupportedFiles": True}, indent=2))
+            fsutil.write_text_atomic(vault / "core-plugins.json", json.dumps([
+                "file-explorer", "global-search", "switcher", "graph", "backlink", "outgoing-link",
+                "tag-pane", "page-preview", "note-composer", "command-palette", "outline",
+                "file-recovery"], indent=2))
+            fsutil.write_text_atomic(vault / "app.json.README.txt",
+                                     "Questa cartella fa aprire l'archivio come «vault» in Obsidian con "
+                                     "impostazioni comode (link relativi, file non-Markdown visibili). "
+                                     "Puoi modificarla o cancellarla: l'archivio funziona lo stesso.\n")
+        except OSError as exc:
+            log.info("obsidian vault prep skipped: %s", exc)
+
+    @staticmethod
     def _summary_line(summary: dict) -> str:
         c = summary.get("counts", {})
         parts = [f"{c.get('new', 0)} file nuovi", f"{c.get('updated', 0)} aggiornati",
                  f"{c.get('unchanged', 0)} invariati"]
+        if c.get("video_saved"):
+            parts.append(f"{c['video_saved']} video scaricati")
+        if c.get("video_online"):
+            parts.append(f"{c['video_online']} video solo online")
         if c.get("error"):
             parts.append(f"{c['error']} errori")
         if summary.get("missing"):
@@ -413,7 +518,8 @@ class Exporter:
                                                                      kv[1].get("fullname", ""))):
             rows.append({
                 "id": int(cid), "fullname": c.get("fullname", ""), "shortname": c.get("shortname", ""),
-                "folder": c.get("folder", ""), "overview": f"{c.get('folder', '')}/course_overview.md",
+                "folder": c.get("folder", ""), "home": f"{c.get('folder', '')}/{c.get('folder', '')}.md",
+                "overview": f"{c.get('folder', '')}/course_overview.md",
                 "fulltext": f"{c.get('folder', '')}/course_fulltext.md",
                 "last_export": c.get("last_export"), "status": c.get("status", ""),
                 "files": sum((c.get("counts") or {}).get(k, 0) for k in ("new", "updated", "unchanged")),
@@ -430,17 +536,20 @@ class Exporter:
         for r in rows:
             period = " – ".join(x for x in (fmt_d(r["startdate"]), fmt_d(r["enddate"])) if x)
             name = escape_md(r["fullname"]).replace("|", "\\|")
-            lines.append(f"| [{name}]({md_url(r['overview'])}) | {escape_md(r['shortname']).replace('|', '/')} | "
+            lines.append(f"| [{name}]({md_url(r['home'])}) | {escape_md(r['shortname']).replace('|', '/')} | "
                          f"{period} | {fmt_dt(r['last_export'])} | {r['files']} | {r['missing_items']} | "
                          f"{r['status']} |")
         lines += ["", "## Come usare questo archivio", "",
-                  "- Ogni corso ha `course_overview.md` (struttura, obiettivi, attività con link ai file) e "
-                  "`course_fulltext.md` (tutti i testi del corso in un unico file, nell'ordine di Moodle).",
-                  "- Per studiare con un assistente AI carica `course_fulltext.md` e i PDF che ti servono; "
-                  "per la struttura completa usa anche `course_structure.json`.",
+                  "- Apri la cartella di un corso: la nota con **lo stesso nome del corso** è la pagina "
+                  "iniziale (struttura, cosa manca, link a tutto il resto).",
+                  "- Ogni **sezione** è una cartella numerata; le **attività** sono note `.md` dentro la "
+                  "sezione. Un'attività con allegati ha una cartella omonima accanto, con dentro i file.",
+                  "- `course_fulltext.md` raccoglie tutti i testi del corso in un file (comodo per studiare "
+                  "o con un assistente AI); `course_overview.md` è la panoramica dettagliata.",
                   "- `elementi_mancanti.md` elenca ciò che esiste in Moodle ma non è nell'archivio, con il link.",
                   "- Le versioni sostituite dei file sono in `_versioni_precedenti/` dentro ogni corso.",
-                  "- La cartella si può aprire come vault in Obsidian.", ""]
+                  "- **Obsidian:** apri *questa* cartella come vault (è già predisposta). Funziona anche "
+                  "come semplici cartelle e file Markdown, senza Obsidian.", ""]
         fsutil.write_text_atomic(dest / "index.md", "\n".join(lines))
 
     def _write_report(self, dest: Path, results: list, started: float, stop_reason: str) -> str:
@@ -537,6 +646,8 @@ class CourseExport:
         self.pseudo = Pseudonymizer(False)
         self.summary_md = ""
         self.now = time.time()
+        first = re.split(r"[\s,]+", self.title.strip())[0] if self.title.strip() else ""
+        self.course_tag = slug(first or self.shortname or "corso", 24)
 
     # ------------------------------------------------------------------ pipeline
     def run(self) -> dict:
@@ -567,10 +678,13 @@ class CourseExport:
             else:
                 self._render_activity(item)
         self.summary_md = self._course_summary_md()
+        self._collect_videos()
         self._apply_file_policies()
         self.x.emit("phase", message="Download dei file…")
         self._reconcile_moves()
         self._download_all()
+        self._download_videos()
+        self._dedup_identical_files()
         self._scan_manual_files()
         self.x.emit("phase", message="Scrittura dell'archivio…")
         self._track_items()
@@ -657,24 +771,34 @@ class CourseExport:
         top = UniqueNames()
         for sec in self.root_item.children:
             num = int(sec.raw.get("section") or 0)
-            title = re.sub(rf"^\s*0*{num}\s*[.:)\-–]?\s+", "", sec.title) if num else sec.title
-            self._assign(sec, top.take(f"{num:02d}_{slug(title or sec.title, 40)}"))
+            title = strip_section_number(sec.title)
+            self._assign_section(sec, top.take(f"{num:02d} {readable(title or sec.title, 54)}"))
 
-    def _assign(self, item: Item, rel_dir: str) -> None:
-        item.rel_dir = rel_dir
+    def _assign_section(self, sec: Item, rel_dir: str) -> None:
+        """A section is a folder; its intro note is the folder note (same name) inside it."""
+        sec.rel_dir = rel_dir
         base = posixpath.basename(rel_dir)
-        item.md_path = f"{rel_dir}/{base}.md"
+        sec.md_path = f"{rel_dir}/{base}.md"
         names = self.dir_names.setdefault(rel_dir.lower(), UniqueNames())
         names.reserve(MEDIA_DIR)
+        names.reserve(VERSIONS_DIR)
         names.reserve(f"{base}.md")
         n = 0
-        for child in item.children:
+        for child in sec.children:
             if child.kind == "label":
-                child.rel_dir, child.md_path = rel_dir, item.md_path
+                child.rel_dir, child.md_path = rel_dir, sec.md_path
                 continue
             n += 1
             child.number = n
-            self._assign(child, f"{rel_dir}/{names.take(f'{n:02d}_{slug(child.title, 36)}')}")
+            stem = names.take(f"{n:02d} {readable(child.title, 64)}")
+            if child.kind == "section":
+                self._assign_section(child, f"{rel_dir}/{stem}")
+            else:
+                # An activity note lives flat in the section folder; its files (if any) go in a
+                # sibling sub-folder of the same name, created only when there is something to put there.
+                child.rel_dir = f"{rel_dir}/{stem}"
+                child.md_path = f"{rel_dir}/{stem}.md"
+                names.reserve(stem)
 
     # ------------------------------------------------------------------ files
     @staticmethod
@@ -714,13 +838,7 @@ class CourseExport:
         filename = safe_filename(name or fk.rsplit("/", 1)[-1] or "datei", 80)
         if is_video_filename(filename) or is_audio_filename(filename):
             kind = "video"
-        rel_path = join_rel(host.rel_dir, subdir, filename)
-        if self._stream_extension(url) == ".m3u8":
-            kind = "hls"
-            folder = slug(Path(filename).stem, 20) + "_hls_" + hashlib.sha1(fk.encode()).hexdigest()[:8]
-            rel_path = join_rel(host.rel_dir, subdir, folder, "video.m3u8")
-            size = None  # the manifest size does not describe the recording
-        spec = FileSpec(key="media:" + self._norev(fk), url=url, rel_path=rel_path,
+        spec = FileSpec(key="media:" + self._norev(fk), url=url, rel_path=join_rel(host.rel_dir, subdir, filename),
                         size=size, mtime=mtime, kind=kind, label=filename, owner=owner.key,
                         conditional=size is None or mtime is None)
         return self._add_spec(spec)
@@ -729,15 +847,13 @@ class CourseExport:
         url = f.get("fileurl")
         if not url or not self.client.is_file_url(url):
             return None
+        if self._stream_manifest(url):
+            self._missing_stream(owner, url)
+            return None
         filepath = f.get("filepath") or "/"
         segs = [safe_filename(seg, 60) for seg in filepath.strip("/").split("/") if seg]
         folder = join_rel(owner.rel_dir, subdir, *segs)
         filename = f.get("filename") or self.client.file_key(url).rsplit("/", 1)[-1] or "datei"
-        if self._stream_extension(url) == ".m3u8":
-            return self._media_spec(url, owner, name=filename, subdir=subdir)
-        if self._stream_extension(url) == ".mpd":
-            self._missing_stream(owner, url)
-            return None
         spec = FileSpec(key=f"{key_prefix}:{filepath}{filename}", url=url,
                         rel_path=join_rel(folder, safe_filename(filename, 80)),
                         size=f.get("filesize"), mtime=f.get("timemodified"), mimetype=f.get("mimetype") or "",
@@ -756,10 +872,7 @@ class CourseExport:
                 if c.get("type") != "file" or not c.get("fileurl"):
                     continue
                 if self._stream_manifest(c["fileurl"]):
-                    if self.client.is_file_url(c["fileurl"]) and self._stream_extension(c["fileurl"]) == ".m3u8":
-                        self._media_spec(c["fileurl"], item)
-                    else:
-                        self._missing_stream(item, c["fileurl"])
+                    self._missing_stream(item, c["fileurl"])
                     continue
                 if item.modname == "page":
                     if c.get("filename") != "index.html":
@@ -772,7 +885,9 @@ class CourseExport:
         limit = int(self.opts.max_file_mb or 0) * 1024 * 1024
         for spec in self.specs:
             owner = self.items.get(spec.owner)
-            if spec.kind in ("video", "hls") and not self.opts.include_videos:
+            if not self.opts.download_files:
+                spec.status, spec.message = "skipped", "in attesa del download con le estensioni del browser"
+            elif spec.kind == "video" and not spec.is_video_stream and not self.opts.include_videos:
                 spec.status, spec.message = "skipped", "file video escluso dalle impostazioni"
             elif limit and spec.size and spec.size > limit:
                 spec.status, spec.message = "skipped", f"file più grande di {self.opts.max_file_mb} MB"
@@ -781,12 +896,9 @@ class CourseExport:
                 self.counts["skipped"] += 1
 
     # ------------------------------------------------------------------ link/file resolution for HTML
-    def _stream_extension(self, url: str) -> str:
-        path = self.client.file_key(url) if self.client.is_file_url(url) else unquote(urlsplit(url).path)
-        return Path(path).suffix.lower()
-
     def _stream_manifest(self, url: str) -> bool:
-        return self._stream_extension(url) in (".m3u8", ".mpd")
+        path = self.client.file_key(url) if self.client.is_file_url(url) else unquote(urlsplit(url).path)
+        return path.lower().endswith((".m3u8", ".mpd"))
 
     def _missing_stream(self, item: Item, url: str) -> None:
         self._missing(item, "Video in streaming HLS/DASH: playlist/manifest conservato solo come link; "
@@ -798,6 +910,9 @@ class CourseExport:
             item.links.append(entry)
         if self._stream_manifest(url):
             self._missing_stream(item, url)
+        elif provider == "Kaltura/SWITCHcast" and self.opts.download_videos:
+            # The advanced Kaltura pipeline records its own success/failure.
+            return
         elif provider == "H5P":
             self._missing(item, "Contenuto interattivo H5P conservato solo come link", url)
         elif provider not in ("embed", "link") or is_video_filename(unquote(urlsplit(url).path)) or \
@@ -820,7 +935,7 @@ class CourseExport:
     def _file_target(self, url: str, label: str, kind: str, item: Item) -> str | None:
         if not self.client.is_file_url(url):
             return None
-        if self._stream_extension(url) == ".mpd":
+        if self._stream_manifest(url):
             self._missing_stream(item, url)
             return None
         spec = self._media_spec(url, item, kind="video" if kind in ("video", "audio") else "media")
@@ -849,7 +964,7 @@ class CourseExport:
                         return f"@@ITEM:{it.key}@@"
             return "@@ITEM:course@@"
         if self.client.is_file_url(url):
-            if self._stream_extension(url) == ".mpd":
+            if self._stream_manifest(url):
                 self._missing_stream(item, url)
                 return None
             spec = self._media_spec(url, item, kind="linked")
@@ -859,6 +974,8 @@ class CourseExport:
     def _resolve(self, text: str, from_rel: str) -> str:
         def repl(m: re.Match) -> str:
             kind, ref = m.group(1), m.group(2)
+            if kind == "DOC":
+                return rel_link(from_rel, unquote(ref))
             if kind == "PATH":
                 return rel_link(from_rel, unquote(ref))
             if kind == "FILE":
@@ -949,7 +1066,9 @@ class CourseExport:
             item.facts.append(("Completamento", "completato" if cd.get("state") in (1, 2) else "da completare"))
         intro = (inst or {}).get("intro")
         item.description = conv.convert(intro if intro else (m.get("description") or ""))
-        handler = getattr(self, f"_h_{mod}", None) or self._h_generic
+        handler = getattr(self, f"_h_{mod}", None)
+        if handler is None:
+            handler = self._capture_page if mod in CAPTURE_MODS else self._h_generic
         try:
             handler(item, inst or {}, conv)
         except (TokenInvalidError, NetworkError, CancelledError):
@@ -977,7 +1096,6 @@ class CourseExport:
         item.body = "## Contenuto\n\n" + body if body else ""
 
     def _h_resource(self, item: Item, inst: dict, conv: Converter) -> None:
-        # Some API responses expose files only in the module-specific endpoint.
         for entry in inst.get("contentfiles") or []:
             url = entry.get("fileurl")
             if url and self.client.file_key(url) not in self.spec_by_url:
@@ -995,15 +1113,20 @@ class CourseExport:
             self._missing(item, "Indirizzo del link non disponibile")
             return
         provider, canonical = classify_media_url(ext)
-        if self.client.is_file_url(ext) and self._stream_extension(ext) != ".mpd":
+        if self.client.is_file_url(ext) and not self._stream_manifest(ext):
             spec = self._media_spec(ext, item, kind="material", subdir="")
             item.body = f"**File collegato:** [{escape_md(spec.label)}](@@FILE:{spec.index}@@)"
             return
         lines = [f"**Link:** [{escape_md(ext)}]({md_url(ext)})"]
         if provider and provider != "H5P":
-            lines.append(f"*Video su {provider}: conservato solo come link da questa versione.*")
+            lines.append(f"*Video su {provider}: conservato come link finché non viene scaricato.*")
         item.body = "\n\n".join(lines)
         self._online_media(item, canonical, item.title, provider or "link")
+        if provider and provider != "H5P":
+            self._missing(item, f"Video esterno (si guarda online su {provider})", canonical)
+        else:
+            self._missing(item, "Lettura o risorsa esterna: si apre dal link, non è un file "
+                                "nell'archivio", canonical)
 
     def _h_book(self, item: Item, inst: dict, conv: Converter) -> None:
         contents = item.raw.get("contents") or []
@@ -1308,6 +1431,38 @@ class CourseExport:
                 f"- {'☑' if o.get('checked') else '☐'} {escape_md(html_to_text(o.get('text') or ''))}"
                 for o in options)
 
+    def _capture_page(self, item: Item, inst: dict, conv: Converter) -> None:
+        """Save a page that has no web-service content but is readable when opened as the signed-in
+        user (e.g. the FFHS ``ffhssyllabus`` Modulplan). Uses the shared autologin web session; any
+        files, images and video embeds inside are resolved by the item's converter like everywhere else.
+        When the session is unavailable the page is flagged (never silently dropped)."""
+        label = MOD_LABELS.get(item.modname, "Pagina del corso")
+        session = self.x.web_session() if self.opts.capture_pages else None
+        if session is None:
+            reason = self.x.web_reason if self.opts.capture_pages else "cattura delle pagine non attiva"
+            item.body = f"*{label} — si apre in Moodle.*\n\n> {CAPTURE_TIP}"
+            self._missing(item, f"Pagina da catturare non salvata: {reason}")
+            return
+        try:
+            html = session.get_text(item.url)
+        except (TokenInvalidError, NetworkError, CancelledError):
+            raise
+        except Exception as exc:  # the capture is best-effort; never abort the export
+            log.info("page capture failed for %s: %s", item.url, exc)
+            item.body = f"*{label} — si apre in Moodle.*"
+            self._missing(item, f"Pagina non catturata ({exc}): aprirla in Moodle")
+            return
+        region = extract_region_main(html)
+        body = normalize_heading_levels(conv.convert(region), 3) if region else ""
+        if body.strip():
+            item.body = "## Contenuto\n\n" + body
+            if item.modname == "ffhssyllabus":
+                item.facts.append(("Nota", "Modulplan catturato dalla pagina Moodle; le letture elencate "
+                                           "restano esterne — vedi «Letture e risorse esterne»."))
+        else:
+            item.body = f"*{label} — si apre in Moodle.*"
+            self._missing(item, "Contenuto della pagina non riconosciuto: aprirla in Moodle")
+
     def _h_generic(self, item: Item, inst: dict, conv: Converter) -> None:
         note = LINK_ONLY_NOTES.get(item.modname)
         has_files = any(s.owner == item.key for s in self.specs)
@@ -1342,48 +1497,11 @@ class CourseExport:
 
     def _reconcile_moves(self) -> None:
         moves = []
-        hls_moves = []
         for spec in self.specs:
             entry = self.state.files.get(spec.key)
             if entry and entry.get("path") and entry["path"] != spec.rel_path and \
                     fsutil.is_file(self.root / entry["path"]):
-                (hls_moves if spec.kind == "hls" else moves).append((spec, entry["path"]))
-        # An HLS playlist is useful only together with its initialization/media
-        # files. Stage and move the whole generated directory, including cycles
-        # caused by renamed/reordered activities, before changing saved paths.
-        hls_staged = []
-        hls_committed = []
-        try:
-            for spec, old in hls_moves:
-                source = (self.root / old).parent
-                dest = (self.root / spec.rel_path).parent
-                if source == dest:
-                    continue
-                staging = self.root / STATE_DIR / "staging"
-                tmp = staging / ("hls-" + hashlib.sha1(spec.key.encode("utf-8")).hexdigest())
-                if fsutil.exists(tmp):
-                    raise FileExistsError(f"Spostamento HLS precedente da recuperare: {tmp}")
-                fsutil.move(source, tmp)
-                hls_staged.append((spec, old, source, tmp, dest))
-            for move in hls_staged:
-                spec, old, source, tmp, dest = move
-                if fsutil.exists(dest):
-                    raise FileExistsError(f"La destinazione HLS contiene già dei file: {dest}")
-                fsutil.move(tmp, dest)
-                hls_committed.append(move)
-        except BaseException:
-            for spec, old, source, tmp, dest in reversed(hls_committed):
-                fsutil.move(dest, tmp)
-            for spec, old, source, tmp, dest in reversed(hls_staged):
-                if fsutil.exists(tmp):
-                    fsutil.move(tmp, source)
-            raise
-        for spec, old, source, tmp, dest in hls_staged:
-            self.state.files[spec.key]["path"] = spec.rel_path
-            fsutil.remove_empty_dirs(self.root, source.parent)
-            self.counts["moved"] += 1
-        if hls_staged:
-            self.state.save()
+                moves.append((spec, entry["path"]))
         if not moves:
             return
         staging = self.root / STATE_DIR / "staging"
@@ -1403,7 +1521,8 @@ class CourseExport:
         self.state.save()
 
     def _download_all(self) -> None:
-        todo = [s for s in self.specs if s.status == "pending"]
+        # streamed videos are handled separately by _download_videos (via the Kaltura client)
+        todo = [s for s in self.specs if s.status == "pending" and not s.is_video_stream]
         total = len(todo)
         for n, spec in enumerate(todo, 1):
             self.client.check_cancel()
@@ -1461,9 +1580,6 @@ class CourseExport:
             self.x.emit("progress", scope="bytes", done=done, total=size or 0, message=spec.label)
 
         try:
-            if spec.kind == "hls":
-                self._download_hls_spec(spec, progress)
-                return
             res = self.client.download(spec.url, target, expected_size=spec.size, if_modified_since=ims,
                                        progress=progress)
         except (TokenInvalidError, NetworkError, CancelledError):
@@ -1506,56 +1622,151 @@ class CourseExport:
             self.counts["new"] += 1
         self._record(spec, res.size, res.last_modified)
 
-    def _download_hls_spec(self, spec: FileSpec, progress) -> None:
-        """Refresh a complete generated HLS directory, preserving the old copy on failure."""
-        dest = (self.root / spec.rel_path).parent
-        fsutil.ensure_dir(dest.parent)
-        with tempfile.TemporaryDirectory(prefix=".recording-", dir=fsutil.lp(dest.parent)) as temp:
-            staged = Path(temp) / "hls"
-            result = download_hls(self.client, spec.url, staged,
-                                  max_bytes=int(self.opts.max_file_mb or 0) * 1024 * 1024,
-                                  progress=progress)
-            def signature(folder):
-                return {p.relative_to(folder).as_posix(): fsutil.sha256_file(p)
-                        for p in folder.rglob("*") if p.is_file()}
-            have = fsutil.is_file(dest / "video.m3u8")
-            if have and signature(dest) == signature(staged):
-                spec.status = "unchanged"
+    # ------------------------------------------------------------------ streamed videos (Kaltura/SWITCHcast)
+    def _collect_videos(self) -> None:
+        """Turn FFHS (Kaltura/SWITCHcast) video links into download jobs, when video download is on.
+
+        Third-party videos (YouTube, Vimeo, SWITCHtube, …) are never collected: they stay as links.
+        """
+        if not self.opts.download_videos:
+            return
+        seen: set = set()
+        for item in self._walk():
+            if item.kind not in ("activity", "label", "section"):
+                continue
+            for n, (title, url, provider) in enumerate(list(item.links), 1):
+                if provider != "Kaltura/SWITCHcast":
+                    continue
+                ref = parse_kaltura(url, title if title and title != provider else item.title)
+                if ref is None or ref.entry_id in seen:
+                    continue
+                seen.add(ref.entry_id)
+                self._add_video_spec(ref, item, n)
+
+    def _add_video_spec(self, ref: Any, owner: Item, n: int) -> None:
+        host = owner.parent if owner.kind == "label" and owner.parent else owner
+        raw_title = ref.title if (ref.title and ref.title != "Kaltura/SWITCHcast") else ""
+        if not raw_title:
+            if owner.kind == "activity":
+                raw_title = owner.title
+            elif host.kind == "section" and host.title:
+                raw_title = f"Video - {strip_section_number(host.title)}"
             else:
-                backup = None
-                if fsutil.exists(dest):
-                    # Keep the old recording outside the auto-cleaned staging
-                    # directory until publication succeeds. Even when versions
-                    # are disabled, a failed replacement must keep old playback.
-                    backup = dest.with_name(f".previous-{time.time_ns()}")
-                    fsutil.move(dest, backup)
-                try:
-                    fsutil.move(staged, dest)
-                except BaseException:
-                    if backup is not None and fsutil.exists(backup):
-                        try:
-                            if fsutil.exists(dest):
-                                shutil.rmtree(fsutil.lp(dest))
-                            fsutil.move(backup, dest)
-                        except OSError as exc:
-                            raise OSError(f"Ripristino HLS fallito; copia precedente conservata in {backup}") from exc
-                    raise
-                if backup is not None:
-                    if self.opts.keep_versions:
-                        previous = self.root / VERSIONS_DIR / f"hls_{time.time_ns()}"
-                        fsutil.move(backup, previous)
-                    else:
-                        shutil.rmtree(fsutil.lp(backup))
-                spec.status = "updated" if have else "new"
-            self.counts[spec.status] += 1
-            self._record(spec, result.total_bytes, "")
-            spec.message = "HLS offline: apri video.m3u8 con VLC; conserva tutta la cartella"
+                raw_title = "Video della lezione"
+        base = readable(raw_title, 60) or "Video della lezione"
+        name = safe_filename(base, 70)
+        if not is_video_filename(name):
+            name += ".mp4"
+        multiple = sum(1 for _t, _u, p in owner.links if p == "Kaltura/SWITCHcast") > 1
+        if multiple:
+            stem, ext = posixpath.splitext(name)
+            name = f"{stem}_{n:02d}{ext}"
+        subdir = "" if host.kind == "activity" else MEDIA_DIR
+        spec = FileSpec(key=ref.ident, url=ref.launch_url or owner.url, rel_path=join_rel(host.rel_dir, subdir, name),
+                        size=None, mtime=None, kind="video", label=name, owner=owner.key,
+                        conditional=True, kaltura=ref)
+        self._add_spec(spec)
+
+    def _download_videos(self) -> None:
+        vids = [s for s in self.specs if s.is_video_stream and s.status == "pending"]
+        if not vids:
+            return
+        self.x.emit("phase", message="Download dei video delle lezioni…")
+        kc = self.x.video_client()
+        total = len(vids)
+        for n, spec in enumerate(vids, 1):
+            self.client.check_cancel()
+            self.x.emit("progress", scope="files", done=n - 1, total=total, message=f"Video: {spec.label}")
+            self._download_one_video(spec, kc)
+            self.state.save(force=False)
+        self.x.emit("progress", scope="files", done=total, total=total, message="")
+        self.state.save()
+
+    def _download_one_video(self, spec: FileSpec, kc: Any) -> None:
+        owner = self.items.get(spec.owner)
+        entry = self.state.files.get(spec.key)
+        if entry and entry.get("path") and fsutil.is_file(self.root / entry["path"]):
+            spec.rel_path = entry["path"]  # videos are large and rarely change: keep what we already have
+            spec.label = posixpath.basename(spec.rel_path)
+            spec.status = "unchanged"
+            self.counts["unchanged"] += 1
+            return
+        if kc is None:
+            spec.status, spec.message = "skipped", (self.x.video_reason or "download dei video non disponibile")
+            if owner is not None:
+                self._missing(owner, f"Video della lezione non scaricato: {spec.message}", spec.url)
+            self.counts["video_online"] += 1
+            return
+
+        def progress(done: int, size: int | None) -> None:
+            self.x.emit("progress", scope="bytes", done=done, total=size or 0, message=spec.label)
+
+        try:
+            outcome = kc.download(spec.kaltura, self.root / spec.rel_path, progress)
+        except (TokenInvalidError, NetworkError, CancelledError):
+            raise
+        except Exception as exc:  # the video pipeline must never abort the whole export
+            log.info("video download error: %s", exc)
+            outcome = None
+        if outcome is None or outcome.status != "downloaded":
+            note = (outcome.note if outcome else "errore imprevisto") or "non scaricabile"
+            spec.status, spec.message = "skipped", note
+            if owner is not None:
+                self._missing(owner, f"Video della lezione non scaricato ({note})", spec.url)
+            self.counts["video_online"] += 1
+            return
+        if outcome.suffix and not spec.rel_path.lower().endswith(outcome.suffix.lower()):
+            spec.rel_path = re.sub(r"\.[^./]+$", outcome.suffix, spec.rel_path)
+            spec.label = posixpath.basename(spec.rel_path)
+        spec.size = outcome.size
+        spec.status = "new"
+        self.counts["new"] += 1
+        self.counts["video_saved"] += 1
+        self.changed_files.append(spec.rel_path)
+        self._record(spec, outcome.size, "")
+
+    def _dedup_identical_files(self) -> None:
+        """Collapse byte-identical downloads in the same folder into one file (e.g. the same PDF
+        embedded in two quiz questions). Links keep working: duplicates point at the kept file."""
+        kept: dict = {}  # (dir, sha256) -> spec kept there
+        for spec in self.specs:
+            if not spec.local_ok or spec.is_video_stream:
+                continue
+            path = self.root / spec.rel_path
+            if not fsutil.is_file(path):
+                continue
+            try:
+                sha = fsutil.sha256_file(path)
+            except OSError:
+                continue
+            key = (posixpath.dirname(spec.rel_path), sha)
+            first = kept.get(key)
+            if first is None:
+                kept[key] = spec
+                continue
+            # byte-for-byte duplicate: drop this copy and repoint it at the one we keep
+            if spec.status in self.counts:
+                self.counts[spec.status] -= 1
+            try:
+                fsutil.remove(path)
+                fsutil.remove_empty_dirs(self.root, path.parent)
+            except OSError:
+                pass
+            if spec.rel_path in self.changed_files:
+                self.changed_files.remove(spec.rel_path)
+            self.state.files.pop(spec.key, None)
+            spec.rel_path = first.rel_path
+            spec.size = first.size
+            spec.status = "unchanged"
+            spec.message = ""
+            self.counts["duplicati"] += 1
+        if self.counts.get("duplicati"):
+            self.state.touch()
 
     def _scan_manual_files(self) -> None:
         """Files the user saved into an activity folder (e.g. a PDF printout of an H5P activity)."""
         known = {s.rel_path.lower() for s in self.specs}
         known |= {str(e.get("path", "")).lower() for e in self.state.files.values()}
-        generated_hls = {posixpath.dirname(s.rel_path).lower() for s in self.specs if s.kind == "hls"}
         root_lp = fsutil.lp(self.root)
         for item in self._walk():
             if item.kind != "activity" or not item.rel_dir:
@@ -1565,9 +1776,7 @@ class CourseExport:
                 continue
             found = []
             for dirpath, dirnames, filenames in os.walk(fsutil.lp(folder)):
-                dirnames[:] = sorted(d for d in dirnames if d != MEDIA_DIR and not d.startswith(".") and
-                                     os.path.relpath(os.path.join(dirpath, d), root_lp)
-                                     .replace(os.sep, "/").lower() not in generated_hls)
+                dirnames[:] = sorted(d for d in dirnames if d != MEDIA_DIR and not d.startswith("."))
                 for name in sorted(filenames):
                     if name.startswith(".") or name.endswith((".part", ".new", ".tmp")):
                         continue
@@ -1611,9 +1820,12 @@ class CourseExport:
     def _frontmatter(self, item: Item) -> str:
         lines = ["---", f"title: {yaml_str(item.title)}"]
         if item.kind == "section":
-            lines.append(f"type: {'subsection' if item.module else 'section'}")
+            type_name = "subsection" if item.module else "section"
         else:
-            lines.append(f"type: {item.modname}")
+            type_name = item.modname
+        lines.append(f"type: {type_name}")
+        tags = [f"ffhs/{self.course_tag}", f"tipo/{slug(type_name or 'attivita', 24).lower()}"]
+        lines.append(f"tags: [{', '.join(yaml_str(t) for t in tags)}]")
         lines.append(f"course: {yaml_str(self.title)}")
         crumbs = item.breadcrumb()
         if crumbs:
@@ -1637,7 +1849,7 @@ class CourseExport:
             parts.append(f"[Apri in Moodle]({md_url(item.url)})")
         return " · ".join(parts)
 
-    def _files_of(self, item: Item, kinds: tuple = ("material", "video", "hls")) -> list:
+    def _files_of(self, item: Item, kinds: tuple = ("material", "video")) -> list:
         return [s for s in self.specs if s.owner == item.key and s.kind in kinds]
 
     def _file_line(self, spec: FileSpec, indent: str = "") -> str:
@@ -1674,8 +1886,35 @@ class CourseExport:
                 f"- {escape_md(r)}" + (f" — [Moodle]({md_url(u)})" if u else "") for r, u in item.missing))
         return blocks
 
+    def _online_banner(self, item: Item) -> str:
+        """A short callout at the top of notes whose content is online-only (so the user sees why
+        there is no file here, instead of thinking the export missed it)."""
+        has_local = any(s.owner == item.key and s.local_ok for s in self.specs)
+        if has_local:
+            return ""
+        video_links = any(p not in ("link", "embed", "H5P") for _t, _u, p in item.links)
+        is_video = item.modname in VIDEO_MODS or video_links
+        is_external = item.modname == "url"
+        is_interactive = item.modname in LINK_ONLY_NOTES and not is_video
+        if not (is_video or is_external or is_interactive):
+            return ""
+        if is_video:
+            what = ("È un **video in streaming** (Kaltura/SWITCHcast o simili): si guarda in Moodle. "
+                    "Per averlo offline, accedi con l'opzione «Scarica i video delle lezioni» attiva e riesporta.")
+        elif is_external:
+            what = ("È una **risorsa esterna** (biblioteca FFHS, articolo, sito): si apre dal link qui sotto, "
+                    "non è un file nell'archivio.")
+        else:
+            what = ("È un **contenuto interattivo** che si usa dentro Moodle. Per conservarlo, aprilo in "
+                    "Moodle e salva la pagina come PDF nella cartella di questa attività.")
+        link = f" · [Apri in Moodle]({md_url(item.url)})" if item.url else ""
+        return f"> [!info] Solo online — nessun file da scaricare\n> {what}{link}"
+
     def _activity_md(self, item: Item) -> str:
         blocks = [self._frontmatter(item), f"# {escape_md(item.title)}", self._meta_line(item)]
+        banner = self._online_banner(item)
+        if banner:
+            blocks.append(banner)
         blocks += self._activity_body(item, 2)
         return self._resolve("\n\n".join(blocks).strip() + "\n", item.md_path)
 
@@ -1742,7 +1981,7 @@ class CourseExport:
                 blocks.extend(self._overview_tree(child, level + 1))
             else:
                 run.append(self._child_line(child))
-                for spec in self._files_of(child, ("material", "video", "hls", "submission", "feedback", "attachment")):
+                for spec in self._files_of(child, ("material", "video", "submission", "feedback", "attachment")):
                     run.append(self._file_line(spec, "  "))
                 for rel in child.manual_files:
                     run.append(f"  - [{escape_md(posixpath.basename(rel))}](@@PATH:{quote(rel, safe='/')}@@)"
@@ -1766,20 +2005,93 @@ class CourseExport:
         if d.get("categoryname"):
             facts.append(f"- **Categoria:** {escape_md(html_to_text(d['categoryname']))}")
         facts.append(f"- **Moodle:** [Apri il corso]({md_url(self.course_url)})")
+        facts.append("- **Estensioni:** [Download raccolti da Moodle Buddy e FetchV](download_estensioni.md)")
         return facts
+
+    def _subtree(self, sec: Item) -> list:
+        return [sec, *self._walk(sec)]
+
+    def _section_stats(self, sec: Item) -> dict:
+        subtree = self._subtree(sec)
+        keys = {it.key for it in subtree}
+        acts = [it for it in subtree if it.kind == "activity"]
+        files = [s for s in self.specs if s.owner in keys and s.local_ok]
+        videos = [s for s in files if s.is_video_stream]
+        missing = sum(len(it.missing) for it in subtree)
+        return {"activities": len(acts), "files": len(files), "videos": len(videos),
+                "size": sum(s.size or 0 for s in files), "missing": missing}
+
+    def _home_md(self) -> str:
+        home_rel = f"{self.folder}.md"
+        c = Counter(s.status for s in self.specs)
+        saved = [s for s in self.specs if s.local_ok]
+        videos_saved = [s for s in saved if s.is_video_stream]
+        total_size = sum(s.size or 0 for s in saved)
+        missing_total = sum(len(it.missing) for it in self.items.values())
+        blocks = ["\n".join(["---", f"title: {yaml_str(self.title)}", "type: corso",
+                             f"tags: [{yaml_str('ffhs/' + self.course_tag)}, {yaml_str('tipo/corso')}]",
+                             f"moodle_url: {yaml_str(self.course_url)}", f"moodle_id: {self.cid}", "---"]),
+                  f"# {escape_md(self.title)}", "\n".join(self._course_header()),
+                  "> **Archivio del corso.** Struttura e testi sono salvati localmente; i contenuti ancora "
+                  "online restano indicati con il loro link. Per le copie raccolte con FetchV e Moodle Buddy "
+                  "apri [Download dalle estensioni](download_estensioni.md)."]
+
+        brief = [f"- **{len(self.root_item.children)} sezioni · "
+                 f"{sum(1 for it in self.items.values() if it.kind == 'activity')} attività**",
+                 f"- **{len(saved)} file salvati**" + (f" ({human_size(total_size)})" if total_size else "")
+                 + (f", di cui {len(videos_saved)} video delle lezioni" if videos_saved else "")]
+        if missing_total:
+            brief.append(f"- **Da controllare:** {missing_total} elementi non (completamente) salvati — "
+                         "vedi [cosa manca](@@DOC:elementi_mancanti.md@@)")
+        blocks.append("## In breve\n\n" + "\n".join(brief))
+
+        rows = ["| Sezione | Attività | File | Da controllare |", "| --- | ---: | ---: | ---: |"]
+        for sec in self.root_item.children:
+            st = self._section_stats(sec)
+            warn = f"⚠ {st['missing']}" if st["missing"] else "—"
+            vids = f" (di cui {st['videos']} video)" if st["videos"] else ""
+            rows.append(f"| [{escape_md(sec.title)}](@@ITEM:{sec.key}@@) | {st['activities']} | "
+                        f"{st['files']}{vids} | {warn} |")
+        blocks.append("## Sezioni\n\n" + "\n".join(rows))
+
+        nav = ["- 📄 [Panoramica dettagliata](@@DOC:course_overview.md@@) — tutta la struttura con i file",
+               "- 📝 [Testo completo del corso](@@DOC:course_fulltext.md@@) — tutti i testi in un file "
+               "(utile per studiare o con un assistente AI)",
+               "- 📂 [Elenco di tutti i file](@@DOC:file_del_corso.md@@)",
+               "- ⚠ [Cosa manca / non scaricato](@@DOC:elementi_mancanti.md@@)",
+               "- ✅ [Confronto con Moodle](@@DOC:verifica_corso.md@@) — checklist per verificare",
+               "- 🗂 [Struttura in JSON](@@DOC:course_structure.json@@)"]
+        blocks.append("## Nell'archivio\n\n" + "\n".join(nav))
+
+        blocks.append("## Com'è organizzato\n\n" + "\n".join([
+            "- Ogni **sezione** del corso è una cartella numerata (`01 …`, `02 …`); dentro trovi le sue "
+            "**attività** come note `.md` e una nota con lo stesso nome della sezione (la panoramica).",
+            "- Un'attività con **allegati** ha, accanto alla sua nota, una cartella con lo stesso nome che "
+            "contiene i file (PDF, PowerPoint, video…).",
+            "- `_media/` contiene immagini e file incorporati nei testi; `_versioni_precedenti/` conserva le "
+            "versioni dei file sostituite in Moodle."]))
+
+        blocks.append("## Ultimo aggiornamento\n\n" + "\n".join([
+            f"- **Data:** {fmt_dt(self.now)}",
+            f"- **File:** {c['new'] + c['updated'] + c['unchanged']} nell'archivio · "
+            f"{c['error'] + c['skipped']} non scaricati",
+            f"- **Sito:** {self.client.site_url} (Moodle {self.client.site_info_data.get('release', '?')})",
+            f"- **Programma:** FFHS Moodle Archiver {__version__}"]))
+        return self._resolve("\n\n".join(blocks).strip() + "\n", home_rel)
 
     def _course_summary_md(self) -> str:
         summary = self.details.get("summary") or self.course.get("summary") or ""
         return self._converter(self.root_item, base_url=self.course_url).convert(summary)
 
     def _overview_md(self) -> str:
-        blocks = ["---", f"title: {yaml_str(self.title)}", "type: course", f"moodle_url: {yaml_str(self.course_url)}",
-                  f"moodle_id: {self.cid}", "---"]
+        blocks = ["---", f"title: {yaml_str(self.title)}", "type: course",
+                  f"tags: [{yaml_str('ffhs/' + self.course_tag)}, {yaml_str('tipo/corso')}]",
+                  f"moodle_url: {yaml_str(self.course_url)}", f"moodle_id: {self.cid}", "---"]
         blocks = ["\n".join(blocks), f"# {escape_md(self.title)}", "\n".join(self._course_header() + [
-            "- **Nell'archivio:** [testo completo](course_fulltext.md) · [informazioni](course_info.md) · "
-            "[elementi non esportati](elementi_mancanti.md) · [verifica con Moodle](verifica_corso.md) · "
-            "[video e media](video_e_media.md) · "
-            "[struttura JSON](course_structure.json)"])]
+            f"- **Nell'archivio:** [◀ inizio]({md_url(self.folder + '.md')}) · "
+            "[file del corso](file_del_corso.md) · [testo completo](course_fulltext.md) · "
+            "[informazioni](course_info.md) · [elementi non esportati](elementi_mancanti.md) · "
+            "[verifica con Moodle](verifica_corso.md) · [struttura JSON](course_structure.json)"])]
         if self.summary_md:
             blocks.append("## Descrizione del corso\n\n" + normalize_heading_levels(self.summary_md, 3))
         blocks.append("## Struttura del corso")
@@ -1850,22 +2162,87 @@ class CourseExport:
             f"- **Programma:** FFHS Moodle Archiver {__version__}"]))
         return self._resolve("\n\n".join(blocks).strip() + "\n", "course_info.md")
 
+    _KIND_NAMES = {".pdf": "PDF", ".pptx": "PowerPoint", ".ppt": "PowerPoint", ".docx": "Word", ".doc": "Word",
+                   ".xlsx": "Excel", ".xls": "Excel", ".csv": "Tabella CSV", ".zip": "Archivio ZIP",
+                   ".mp4": "Video", ".m4v": "Video", ".mov": "Video", ".webm": "Video", ".ts": "Video",
+                   ".mp3": "Audio", ".m4a": "Audio", ".wav": "Audio", ".png": "Immagine", ".jpg": "Immagine",
+                   ".jpeg": "Immagine", ".gif": "Immagine", ".svg": "Immagine", ".txt": "Testo", ".md": "Testo"}
+
+    def _file_type_name(self, spec: FileSpec) -> str:
+        ext = posixpath.splitext(spec.label or spec.rel_path)[1].lower()
+        if spec.is_video_stream:
+            return "Video lezione"
+        return self._KIND_NAMES.get(ext, (ext[1:].upper() + " file") if ext else "File")
+
+    def _top_section(self, item: Item) -> Item:
+        node = item
+        while node.parent is not None and node.parent.kind != "course":
+            node = node.parent
+        return node
+
+    def _files_index_md(self) -> str:
+        present = [s for s in self.specs if s.local_ok]
+        present.sort(key=lambda s: s.rel_path.lower())
+        total_size = sum(s.size or 0 for s in present)
+        videos = [s for s in present if s.kind == "video"]
+        manual = [(it, r) for it in self._walk() if it.kind == "activity" for r in it.manual_files]
+        not_here = [s for s in self.specs if s.status in ("skipped", "error")]
+        blocks = [f"# File del corso — {escape_md(self.title)}", "",
+                  "Qui trovi, in un colpo d'occhio, **tutti i file salvati sul tuo computer** per questo corso. "
+                  "Ogni riga è un file vero nella cartella dell'archivio: clicca per aprirlo.", ""]
+        head = [f"- **File nell'archivio:** {len(present)}" + (f" ({human_size(total_size)})" if total_size else "")]
+        if videos:
+            head.append(f"- **Di cui video delle lezioni:** {len(videos)}")
+        if manual:
+            head.append(f"- **File aggiunti da te:** {len(manual)}")
+        if not_here:
+            head.append(f"- **Non scaricati (restano in Moodle/online):** {len(not_here)} — vedi in fondo")
+        blocks.append("\n".join(head))
+        if present:
+            rows = ["| File | Tipo | Dimensione | Attività | Sezione |", "| --- | --- | --- | --- | --- |"]
+            for s in present:
+                owner = self.items.get(s.owner)
+                sec = self._top_section(owner) if owner else None
+                act = (f"[{escape_md(owner.title)}](@@ITEM:{owner.key}@@)"
+                       if owner and owner.kind == "activity" else (escape_md(owner.title) if owner else ""))
+                rows.append(f"| [{escape_md(s.label)}](@@FILE:{s.index}@@) | {escape_md(self._file_type_name(s))} | "
+                            f"{human_size(s.size) or '—'} | {act} | {escape_md(sec.title) if sec else ''} |")
+            blocks.append("## File scaricati\n\n" + "\n".join(rows))
+        else:
+            blocks.append("## File scaricati\n\n*Nessun file scaricabile: questo corso è fatto soprattutto di "
+                          "testi, link e video in streaming. Vedi `course_fulltext.md` per i testi e "
+                          "`elementi_mancanti.md` per ciò che resta online.*")
+        if manual:
+            lines = [f"- [{escape_md(posixpath.basename(r))}](@@PATH:{quote(r, safe='/')}@@) — in "
+                     f"[{escape_md(it.title)}](@@ITEM:{it.key}@@)" for it, r in manual]
+            blocks.append("## Aggiunti da te\n\n" + "\n".join(lines))
+        if not_here:
+            lines = []
+            for s in not_here:
+                owner = self.items.get(s.owner)
+                where = f" — in [{escape_md(owner.title)}](@@ITEM:{owner.key}@@)" if owner else ""
+                link = f" · [Moodle]({md_url(s.url)})" if s.url and self.client.is_site_url(s.url) else ""
+                lines.append(f"- **{escape_md(s.label)}** — {escape_md(s.message or 'non scaricato')}{where}{link}")
+            blocks.append("## Non scaricati (restano in Moodle o online)\n\n" + "\n".join(lines))
+        return self._resolve("\n\n".join(blocks).strip() + "\n", "file_del_corso.md")
+
     @staticmethod
     def _missing_kind(item: Item, reason: str) -> str:
         low = reason.lower()
         if "accesso limitato" in low or "nascost" in low:
             return "limitato"
-        if "download non riuscito" in low:
+        if "lettura esterna" in low or "risorsa esterna" in low or "biblioteca" in low:
+            return "esterno"
+        if "video esterno" in low or "video della lezione" in low:
+            return "video"
+        if "download non riuscito" in low or "download del video non" in low:
             return "errore"
-        if "escluse dalle impostazioni" in low or "escluso dalle impostazioni" in low or \
-                "più grande di" in low or "limite impostato" in low:
+        if "escluse dalle impostazioni" in low or "escluso dalle impostazioni" in low or "più grande di" in low:
             return "impostazioni"
         if low.startswith(("video", "audio")):
             return "video"
         if "h5p" in low:
             return "interattivo"
-        if "conservato solo come link" in low:
-            return "collegamento"
         if item.modname == "quiz":
             return "quiz"
         if item.modname in VIDEO_MODS:
@@ -1898,12 +2275,9 @@ class CourseExport:
             lines.append("")
         if not groups:
             lines.append("Nessun elemento mancante rilevato nei dati elaborati. Questo controllo non garantisce "
-                         "che le API espongano tutti i contenuti visibili nel browser: confronta "
-                         "`verifica_corso.md` con Moodle. Libri e materiali citati nei documenti "
-                         "non vengono individuati automaticamente.")
+                         "che le API espongano tutti i contenuti del corso: confronta con Moodle.")
         return "\n".join(lines).rstrip() + "\n"
 
-    # ------------------------------------------------------------------ comparison checklist
     def _media_inventory_md(self) -> str:
         lines = [f"# Video e media — {escape_md(self.title)}", "",
                  "[Panoramica del corso](course_overview.md) · [Contenuti mancanti](elementi_mancanti.md)", "",
@@ -1945,6 +2319,8 @@ class CourseExport:
                       "Questo non esclude la presenza di player o contenuti non esposti dalle API."]
         return "\n".join(lines).rstrip() + "\n"
 
+
+    # ------------------------------------------------------------------ comparison checklist
     _TIME_RE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)?\s?(?:h|Std\.?|Stunden?|min|Minuten|ore|ora)(?![\w])", re.I)
 
     def _verification_md(self) -> str:
@@ -2029,16 +2405,26 @@ class CourseExport:
                            "enddate": fmt_d(self.details.get("enddate") or self.course.get("enddate")),
                            "teachers": [c.get("fullname") for c in self.details.get("contacts") or []]},
                 "sections": [node(s) for s in self.root_item.children]}
-        return json.dumps(data, ensure_ascii=False, indent=1) + "\n"
+        # Resolve @@FILE/@@ITEM/@@PATH placeholders left in label/description text to local paths too.
+        return self._resolve(json.dumps(data, ensure_ascii=False, indent=1) + "\n", "course_structure.json")
 
     def _write_all(self) -> None:
+        if not fsutil.is_file(self.root / "download_estensioni.md"):
+            self._write_text("download_estensioni.md", "---\ntitle: Download dalle estensioni\ntype: manual\n---\n\n"
+                             "# Download dalle estensioni\n\n[Panoramica del corso](course_overview.md)\n\n"
+                             "Nessun download importato finora. Usa i pulsanti Moodle Buddy e FetchV nell'app.\n",
+                             "course", version=False)
+        else:
+            self.texts_now["download_estensioni.md"] = "course"
         for item in self._walk():
             self.client.check_cancel()
             if item.kind == "section":
                 self._write_text(item.md_path, self._section_md(item), item.key)
             elif item.kind == "activity":
                 self._write_text(item.md_path, self._activity_md(item), item.key)
+        self._write_text(f"{self.folder}.md", self._home_md(), "course", version=False)
         self._write_text("course_overview.md", self._overview_md(), "course", version=False)
+        self._write_text("file_del_corso.md", self._files_index_md(), "course", version=False)
         self._write_text("course_fulltext.md", self._fulltext_md(), "course", version=False)
         self._write_text("course_info.md", self._info_md(), "course", version=False)
         self._write_text("elementi_mancanti.md", self._missing_md(), "course", version=False)

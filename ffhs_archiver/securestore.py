@@ -93,6 +93,7 @@ class Credentials:
     release: str = ""
     saved_at: float = 0.0
     protection: str = ""
+    privatetoken: str = ""  # kept (encrypted with the rest) only if video download is on; else empty
 
 
 class TokenStore:

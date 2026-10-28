@@ -23,7 +23,7 @@ from .moodle import MoodleError, RedactingFilter, TokenInvalidError, allowed_sit
 from .session import Session
 from .sso import SSOError
 from .state import ArchiveIndex
-from .browser_import import list_activities, import_files, import_directory
+from .extension_dialog import open_extension_dialog
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +134,8 @@ class App:
         self._setup_style()
         self.raw_var = tk.BooleanVar(value=bool(self.settings.save_raw_json))
         self.handler_var = tk.BooleanVar(value=bool(self.settings.use_protocol_handler))
+        # The chosen extensions workflow needs only the ordinary mobile-app token.
+        self.advanced_var = tk.BooleanVar(value=False)
         self._build_menu()
         self._build_header()
         self.body = ttk.Frame(root, padding=(16, 10, 16, 6))
@@ -251,9 +253,9 @@ class App:
         m_tools.add_command(label="Verifica accesso (senza download)", command=self._verify_access)
         m_tools.add_command(label="Anteprima del corso evidenziato (senza download)", command=self._preview_course)
         m_tools.add_command(label="Diagnostica del corso evidenziato…", command=self._diagnose)
-        m_tools.add_command(label="Video Kaltura / assistente browser…", command=self._browser_video_help)
-        m_tools.add_command(label="Importa file scaricati dal browser…", command=self._import_browser_files)
-        m_tools.add_command(label="Importa cartella video HLS…", command=lambda: self._import_browser_files(True))
+        m_tools.add_separator()
+        m_tools.add_command(label="Documenti con Moodle Buddy…", command=lambda: open_extension_dialog(self, "moodle_buddy"))
+        m_tools.add_command(label="Video con FetchV…", command=lambda: open_extension_dialog(self, "fetchv"))
         m_tools.add_command(label="Apri cartella dei registri", command=lambda: winutil.open_path(app_dir() / "logs"))
         m_tools.add_separator()
         m_tools.add_checkbutton(label="Salva anche i dati tecnici grezzi (solo per diagnosi)",
@@ -333,6 +335,9 @@ class App:
                              "esattamente quanto c'era prima. Senza questa opzione il registro non viene toccato e "
                              "copi il link a mano.",
                   style="Muted.TLabel", wraplength=660, justify="left").grid(row=7, column=0, sticky="w", padx=(22, 0))
+        ttk.Label(card, text="Dopo l'accesso, usa «Documenti con Moodle Buddy» e «Video con FetchV» "
+                             "per raccogliere nell'archivio i download delle estensioni già installate nel browser.",
+                  style="Muted.TLabel", wraplength=660, justify="left").grid(row=9, column=0, sticky="w", pady=(6, 0))
         self.login_status = ttk.Label(card, text="", wraplength=660, justify="left")
         self.login_status.grid(row=8, column=0, sticky="w", pady=(8, 0))
         self.wait_frame = ttk.Frame(card)
@@ -452,40 +457,42 @@ class App:
             ("anonymize_others", "   nascondi i nomi degli altri studenti"),
             ("include_quiz_reviews", "Quiz già svolti (domande e feedback)"),
             ("include_submissions", "Mie consegne e feedback"),
-            ("include_videos", "Video Moodle (file e HLS supportati)"),
+            ("include_videos", "File video caricati in Moodle"),
             ("keep_versions", "Conserva le versioni precedenti"),
+            ("obsidian_ready", "Prepara la cartella per Obsidian"),
         ]
         for i, (key, label) in enumerate(options):
             var = tk.BooleanVar(value=bool(getattr(self.settings, key)))
             self.opt_vars[key] = var
-            ttk.Checkbutton(side, text=label, variable=var).grid(row=2 + i, column=0, sticky="w", pady=1)
+            cb = ttk.Checkbutton(side, text=label, variable=var)
+            cb.grid(row=2 + i, column=0, sticky="w", pady=1)
+        ttk.Label(side, text="Le estensioni scaricano nel browser; il programma raccoglie e organizza i file.",
+                  style="Muted.TLabel", wraplength=300).grid(row=2 + len(options), column=0, sticky="ew", pady=(5, 2))
         size = ttk.Frame(side)
-        size.grid(row=8, column=0, sticky="w", pady=(6, 0))
+        size.grid(row=3 + len(options), column=0, sticky="w", pady=(6, 0))
         ttk.Label(size, text="Limite per file:").grid(row=0, column=0)
         self.maxmb_var = tk.StringVar(value=str(self.settings.max_file_mb or 0))
         ttk.Spinbox(size, from_=0, to=10000, increment=50, width=6, textvariable=self.maxmb_var).grid(
             row=0, column=1, padx=6)
         ttk.Label(size, text="MB (0 = nessuno)", style="Muted.TLabel").grid(row=0, column=2)
         actions = ttk.Frame(side)
-        actions.grid(row=9, column=0, sticky="ew", pady=(12, 0))
+        actions.grid(row=4 + len(options), column=0, sticky="ew", pady=(12, 0))
         actions.columnconfigure(0, weight=1)
-        self.btn_export = self._accent_button(actions, "Esporta i corsi selezionati", lambda: self._export(False),
+        ttk.Button(actions, text="Documenti con Moodle Buddy…",
+                   command=lambda: open_extension_dialog(self, "moodle_buddy")).grid(row=0, column=0, sticky="ew")
+        ttk.Button(actions, text="Video con FetchV…",
+                   command=lambda: open_extension_dialog(self, "fetchv")).grid(row=1, column=0, sticky="ew", pady=(5, 8))
+        self.btn_export = self._accent_button(actions, "Esporta struttura, testi e file API", lambda: self._export(False),
                                               big=True)
-        self.btn_export.grid(row=0, column=0, sticky="ew")
+        self.btn_export.grid(row=2, column=0, sticky="ew")
         self.btn_export_all = ttk.Button(actions, text="Esporta tutti i corsi", command=lambda: self._export(True))
-        self.btn_export_all.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self.btn_export_all.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         self.btn_cancel = ttk.Button(actions, text="Interrompi", command=self._cancel_export, state="disabled")
-        self.btn_cancel.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(actions, text="Video Kaltura / browser…", command=self._browser_video_help).grid(
-            row=3, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(actions, text="Importa file dal browser…", command=self._import_browser_files).grid(
-            row=4, column=0, sticky="ew", pady=(5, 0))
-        ttk.Button(actions, text="Importa cartella video HLS…",
-                   command=lambda: self._import_browser_files(True)).grid(row=5, column=0, sticky="ew", pady=(5, 0))
+        self.btn_cancel.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         hint = ttk.Label(side, text="La prima volta scarica tutto; poi solo novità e modifiche. Se interrompi, "
                                     "la prossima esportazione riprende da dove si era fermata.",
                          style="Muted.TLabel", wraplength=300, justify="left")
-        hint.grid(row=10, column=0, sticky="ew", pady=(10, 0))
+        hint.grid(row=5 + len(options), column=0, sticky="ew", pady=(10, 0))
         side.bind("<Configure>", lambda e: hint.configure(wraplength=max(160, e.width - 30)))
 
         # progress + log
@@ -742,7 +749,9 @@ class App:
                 self.wait_frame.grid_remove()
             self.login_status.configure(text=str(exc), foreground=ERR)
 
-        self._run_bg(lambda: self.session.finish_login(text, require_signature=require_signature), done, failed)
+        keep_private = bool(self.advanced_var.get())
+        self._run_bg(lambda: self.session.finish_login(text, require_signature=require_signature,
+                                                       keep_private_token=keep_private), done, failed)
 
     def _logout(self) -> None:
         if self.busy:
@@ -944,11 +953,14 @@ class App:
         except ValueError:
             maxmb = 0
         return ExportOptions(dest=self.dest_var.get().strip(), max_file_mb=maxmb,
-                             save_raw_json=bool(self.raw_var.get()),
+                             save_raw_json=bool(self.raw_var.get()), private_token="",
+                             download_videos=False, capture_pages=False,
                              **{k: bool(v.get()) for k, v in self.opt_vars.items()})
 
     def _save_settings(self) -> None:
         s = self.settings
+        s.download_videos = False
+        s.capture_pages = False
         if hasattr(self, "dest_var"):
             s.archive_dir = self.dest_var.get().strip() or s.archive_dir
             for k, v in self.opt_vars.items():
@@ -1085,90 +1097,6 @@ class App:
         messagebox.showerror(APP_NAME, f"Esportazione non riuscita:\n{exc}", parent=self.root)
 
     # ------------------------------------------------------------------ tools
-    def _browser_video_help(self) -> None:
-        folder = Path(__file__).resolve().parent.parent / "browser_helper"
-        if not folder.is_dir():
-            messagebox.showerror(APP_NAME, "Manca l'assistente browser: estrai tutta la nuova versione.", parent=self.root)
-            return
-        messagebox.showinfo(APP_NAME,
-            "I player Kaltura/SWITCHcast possono richiedere la sessione del browser.\n\n"
-            "1. In Edge apri edge://extensions (in Chrome chrome://extensions).\n"
-            "2. Attiva Modalità sviluppatore → Carica estensione non pacchettizzata e scegli "
-            "la cartella browser_helper che si aprirà. Basta farlo una volta.\n"
-            "3. Apri l'attività in Moodle, abilita il rilevamento nell'assistente e avvia il video.\n"
-            "4. Apri l'assistente: scegli il video o lo streaming HLS supportato e scaricalo.\n"
-            "5. Torna qui e usa Importa file oppure Importa cartella video HLS per inserirlo "
-            "nell'attività corretta.\n\n"
-            "YouTube resta un link. Video cifrati/DRM e formati non supportati vengono segnalati. "
-            "Le cartelle HLS si aprono offline con VLC: conserva playlist e segmenti insieme.\n\n"
-            "Le istruzioni complete sono in browser_helper/README.md.", parent=self.root)
-        winutil.open_path(folder)
-
-    def _import_browser_files(self, directory: bool = False) -> None:
-        if self.busy:
-            messagebox.showinfo(APP_NAME, "Attendi il termine dell'esportazione prima di importare.", parent=self.root)
-            return
-        course = self._highlighted_course()
-        if course is None:
-            messagebox.showinfo(APP_NAME, "Evidenzia il corso già esportato nell'elenco.", parent=self.root)
-            return
-        archive = Path(self.dest_var.get())
-        try:
-            activities = list_activities(archive, int(course["id"]))
-            if not activities:
-                raise ValueError("Esporta prima il corso: non ci sono attività locali disponibili.")
-        except (OSError, ValueError) as exc:
-            messagebox.showerror(APP_NAME, str(exc), parent=self.root)
-            return
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Scegli l'attività di destinazione")
-        dialog.transient(self.root)
-        frame = ttk.Frame(dialog, padding=16)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="In quale attività vuoi conservare il materiale scaricato?").pack(anchor="w")
-        choice = ttk.Combobox(frame, state="readonly", width=80,
-                             values=[f"{a['key']} · {a['title']}" for a in activities])
-        choice.pack(fill="x", pady=12)
-        choice.current(0)
-
-        def select() -> None:
-            activity = activities[choice.current()]
-            initial = Path.home() / "Downloads" / "FFHS_Moodle"
-            if not initial.is_dir():
-                initial = Path.home() / "Downloads"
-            if directory:
-                source = filedialog.askdirectory(title="Scegli la cartella con playlist e segmenti HLS",
-                                                initialdir=str(initial), parent=dialog)
-                if not source:
-                    return
-                work = lambda: import_directory(source, archive, int(course["id"]), activity["key"])
-            else:
-                sources = filedialog.askopenfilenames(title="Scegli i file scaricati dal browser",
-                                                     initialdir=str(initial), parent=dialog)
-                if not sources:
-                    return
-                work = lambda: import_files(sources, archive, int(course["id"]), activity["key"])
-            dialog.destroy()
-
-            def done(result) -> None:
-                self._importing = False
-                self._set_busy(False)
-                self._log(f"Materiale importato in «{activity['title']}»: {result['note']}", "success")
-                messagebox.showinfo(APP_NAME, "Copia completata. Gli originali restano nella cartella Download.\n\n"
-                    "La nota materiali_browser collega subito i file. Alla prossima esportazione "
-                    "saranno collegati anche nella panoramica del corso.\n\n"
-                    "Verifica che il materiale importato corrisponda al video o documento atteso.", parent=self.root)
-                winutil.open_path(result["note"].parent)
-            def failed(exc) -> None:
-                self._importing = False
-                self._set_busy(False)
-                messagebox.showerror(APP_NAME, f"Importazione non riuscita:\n{exc}", parent=self.root)
-            self._importing = True
-            self._set_busy(True)
-            self.btn_cancel.configure(state="disabled")
-            self._run_bg(work, done, failed)
-        ttk.Button(frame, text="Scegli materiale e importa", command=select).pack(anchor="e")
-
     def _diagnose(self) -> None:
         if not self.client:
             messagebox.showinfo(APP_NAME, "Prima accedi a Moodle.", parent=self.root)
@@ -1206,6 +1134,11 @@ class App:
 
     def _show_help(self) -> None:
         text = (
+            "Download con le estensioni già installate:\n"
+            "Evidenzia un corso e premi «Documenti con Moodle Buddy» oppure «Video con FetchV». "
+            "Scegli cartella e destinazione, apri Moodle, scarica usando l'estensione nel browser, "
+            "poi torna qui: «Download terminati: cerca file» e «Importa selezionati». "
+            "Puoi raccogliere anche file già scaricati. Gli originali vengono conservati.\n\n"
             "Primo utilizzo (consigliato):\n"
             "1. Accedi con FFHS-ID: si apre il browser, fai il login come sempre (anche Microsoft Authenticator). "
             "Quando il browser chiede di aprire il programma, clicca «Apri».\n"
@@ -1218,8 +1151,7 @@ class App:
             "ideale per l'AI), elementi_mancanti.md (cosa non è esportabile e cosa puoi fare), verifica_corso.md "
             "(confronto con Moodle).\n\n"
             "Il programma usa solo funzioni di lettura dell'API ufficiale dell'app Moodle, con i tuoi permessi: "
-            "non modifica nulla in Moodle. L'assistente opzionale usa la tua sessione browser "
-            "per i video dei player incorporati: apri Video Kaltura / browser per la guida."
+            "non modifica nulla in Moodle, non aggira restrizioni e comunica solo con moodle.ffhs.ch."
         )
         messagebox.showinfo("Guida rapida", text, parent=self.root)
 
@@ -1231,7 +1163,7 @@ class App:
     # ------------------------------------------------------------------ closing
     def _on_close(self) -> None:
         if getattr(self, "_importing", False):
-            messagebox.showinfo(APP_NAME, "Attendi il completamento della copia dei materiali prima di chiudere.", parent=self.root)
+            messagebox.showinfo(APP_NAME, "Attendi il completamento dell'importazione prima di chiudere.", parent=self.root)
             return
         if self.busy:
             if not messagebox.askyesno(APP_NAME, "È in corso un'esportazione. Interromperla e chiudere?\n\n"

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import APP_NAME
 
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 
 
 def app_dir() -> Path:
@@ -68,9 +68,14 @@ class Settings:
     include_forums: bool = True
     include_quiz_reviews: bool = True
     include_submissions: bool = True
-    include_videos: bool = True
+    include_videos: bool = True           # download video files Moodle serves (e.g. an MP4 in a folder)
+    download_videos: bool = False         # also fetch streamed FFHS lecture videos (Kaltura/SWITCHcast)
+    capture_pages: bool = False           # optional advanced API capture; browser workflow needs no autologin
+    extension_download_dir: str = ""
+    extension_browser: str = "edge"
     max_file_mb: int = 0
     keep_versions: bool = True
+    obsidian_ready: bool = True  # write a minimal .obsidian config so the archive opens as a vault
     save_raw_json: bool = False  # technical copies of the API answers: only for diagnosis
     anonymize_others: bool = True  # other students' names in forums -> "Partecipante N"
     use_protocol_handler: bool = True  # let the browser hand the login link to the program
@@ -96,6 +101,9 @@ class Settings:
                 setattr(s, key, value)
         if int(data.get("settings_version") or 1) < 2:
             s.save_raw_json = False  # version 0.1 saved the raw API data by default
+        if int(data.get("settings_version") or 1) < 3:
+            s.download_videos = False
+            s.capture_pages = False
         s.settings_version = SETTINGS_VERSION
         if not s.archive_dir:
             s.archive_dir = str(default_archive_dir())

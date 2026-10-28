@@ -17,12 +17,12 @@ class BrowserImportTests(unittest.TestCase):
         self.root = self.base / "archive"
         self.folder = self.root / "course" / "section" / "activity"
         self.folder.mkdir(parents=True)
-        (self.folder / "note.md").write_text("# Attività\n")
+        (self.folder / "activity.md").write_text("# Attività\n")
         self.index = {"courses": [{"id": 42, "folder": "course"}]}
         self.structure = {"course": {"id": 42}, "sections": [{
             "key": "section:1", "type": "section", "title": "Section", "children": [{
                 "key": "cm:2", "type": "page", "title": "Video [demo]",
-                "md": "section/activity/note.md"}]}]}
+                "md": "section/activity/activity.md"}]}]}
         self.write_metadata()
         self.source = self.base / "video (1).mp4"
         self.source.write_bytes(b"user-selected-video")
@@ -78,8 +78,8 @@ class BrowserImportTests(unittest.TestCase):
             self.skipTest("Symbolic links unavailable")
         with self.assertRaises(ValueError):
             import_files([symlink], self.root, 42, "cm:2")
-        (self.folder / "note.md").unlink()
-        (self.folder / "note.md").symlink_to(self.source)
+        (self.folder / "activity.md").unlink()
+        (self.folder / "activity.md").symlink_to(self.source)
         with self.assertRaises(ValueError):
             list_activities(self.root, 42)
 
@@ -149,6 +149,63 @@ class BrowserImportTests(unittest.TestCase):
         self.assertFalse((self.folder / "video_browser").exists())
         self.assertEqual((self.folder / "materiali_browser.md").read_text(), "existing user's note")
         self.assertEqual((hls / "segments" / "001.ts").read_bytes(), b"\x47actual-segment-bytes")
+
+    def use_flat_layout(self):
+        section = self.folder.parent
+        children = []
+        for key, name in (("cm:2", "01_First"), ("cm:3", "02_Second")):
+            (section / (name + ".md")).write_text("# " + name + "\n")
+            children.append({"key": key, "type": "page", "title": name,
+                             "md": "section/" + name + ".md"})
+        self.structure["sections"][0]["children"] = children
+        self.write_metadata()
+        return section
+
+    def test_flat_activity_notes_keep_downloads_in_distinct_attachment_folders(self):
+        section = self.use_flat_layout()
+        activities = list_activities(self.root, 42)
+        self.assertEqual([a["directory"] for a in activities],
+                         [section / "01_First", section / "02_Second"])
+        self.assertTrue(all(not a["directory"].exists() for a in activities))
+        first = import_files([self.source], self.root, 42, "cm:2")
+        second = import_files([self.source], self.root, 42, "cm:3")
+        self.assertEqual(first["files"][0].parent, section / "01_First")
+        self.assertEqual(second["files"][0].parent, section / "02_Second")
+        self.assertIn("](../01_First.md)", first["note"].read_text())
+        self.assertIn("](../02_Second.md)", second["note"].read_text())
+        self.assertEqual((section / "01_First.md").read_text(), "# 01_First\n")
+        self.assertEqual((section / "02_Second.md").read_text(), "# 02_Second\n")
+
+    def test_flat_hls_import_creates_the_right_folder_and_links_the_flat_note(self):
+        section = self.use_flat_layout()
+        result = import_directory(self.make_hls(), self.root, 42, "cm:2")
+        self.assertEqual(result["playlist"], section / "01_First/video_browser/video.m3u8")
+        self.assertIn("](../01_First.md)", result["note"].read_text())
+        self.assertFalse((section / "02_Second").exists())
+
+    def test_flat_copy_failure_removes_only_new_attachment_directory(self):
+        section = self.use_flat_layout()
+        with patch("ffhs_archiver.browser_import.shutil.copyfileobj", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                import_files([self.source], self.root, 42, "cm:2")
+        self.assertFalse((section / "01_First").exists())
+        self.assertEqual((section / "01_First.md").read_text(), "# 01_First\n")
+        self.assertTrue(self.source.is_file())
+
+    def test_flat_attachment_path_cannot_overwrite_a_file_or_follow_a_symlink(self):
+        section = self.use_flat_layout()
+        occupied = section / "01_First"
+        occupied.write_text("user file")
+        with self.assertRaises(ValueError):
+            import_files([self.source], self.root, 42, "cm:2")
+        self.assertEqual(occupied.read_text(), "user file")
+        occupied.unlink()
+        try:
+            occupied.symlink_to(self.base, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symbolic links unavailable")
+        with self.assertRaises(ValueError):
+            import_files([self.source], self.root, 42, "cm:2")
 
 
 if __name__ == "__main__":

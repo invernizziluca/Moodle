@@ -1,7 +1,12 @@
 # FFHS Moodle Archiver – Analisi tecnica e architettura
 
-Stato: 22 ottobre 2026, versione 0.2 (Fasi 1–3 completate; revisione di sicurezza del login in
-`REVISIONE_SICUREZZA.md`; prossimo passo: Verifica accesso e test di un corso sulla FFHS).
+Documento storico della base 0.3 allegata. Per il flusso corrente con Moodle Buddy e FetchV
+consulta [Novità 0.5](NOVITA_0.5.md): la GUI non attiva auto-login o cattura nativa dei video.
+
+Stato: 28 ottobre 2026, versione 0.3 (Fasi 1–3 completate; 0.3 aggiunge download dei video delle lezioni
+Kaltura/SWITCHcast, cattura del Modulplan e delle pagine del corso, e cartella pronta per Obsidian — vedi
+`COSA_SI_PUO_SCARICARE.md`; sicurezza in `REVISIONE_SICUREZZA.md` §7; prossimo passo: test sulla FFHS reale
+con i video e, poi, Fasi 4–5: sincronizzazione pianificata ed eseguibile Windows).
 
 ## Fase 1 – Analisi tecnica
 

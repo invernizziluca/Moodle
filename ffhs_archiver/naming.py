@@ -35,6 +35,43 @@ def slug(text: str, max_len: int = 40, fallback: str = "ohne_Titel") -> str:
     return text
 
 
+_SEP_TRANSLIT = {"/": "-", "\\": "-", ":": " -", "|": "-", "*": "", "?": "", '"': "'", "<": "(", ">": ")"}
+_SECTION_NUM_RE = re.compile(r"^\s*\d{1,2}\s*[.):\-–—]?\s+(?=\S)")
+
+
+def readable(text: str, max_len: int = 60, fallback: str = "Ohne Titel") -> str:
+    """A human-readable, Windows-safe folder/file *component* that keeps Unicode letters and umlauts.
+
+    Unlike ``slug`` (ASCII, for ids/tags), this keeps the real title so a person browsing the archive
+    sees ``05 Weiner (2009) - A Theory of…`` instead of ``05_Weiner_2009_A_Theory_of``.
+    """
+    text = unicodedata.normalize("NFC", text or "")
+    for bad, good in _SEP_TRANSLIT.items():
+        text = text.replace(bad, good)
+    text = "".join(ch if ch >= " " else " " for ch in text)      # drop control chars
+    text = re.sub(r"\s+", " ", text).strip().strip(".").strip()
+    if not text:
+        return fallback
+    if len(text) > max_len:
+        cut = text[:max_len].rstrip()
+        space = cut.rfind(" ")
+        if space >= max_len * 0.6:
+            cut = cut[:space]
+        text = cut.rstrip(" .,;:–—-") + "…"
+    text = text.rstrip(". ")                                      # Windows: no trailing dot/space
+    if not text:
+        return fallback
+    if text.upper().split(".")[0] in _RESERVED:
+        text += "_"
+    return text
+
+
+def strip_section_number(title: str) -> str:
+    """Drop a leading block number from a section title ('1 Entscheidungen…' -> 'Entscheidungen…')."""
+    stripped = _SECTION_NUM_RE.sub("", title or "")
+    return stripped.strip() or (title or "").strip()
+
+
 def safe_filename(name: str, max_len: int = 90) -> str:
     """Keep the original file name (umlauts included) but make it valid on Windows."""
     name = unicodedata.normalize("NFC", name or "")

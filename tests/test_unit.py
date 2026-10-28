@@ -69,58 +69,6 @@ class Html2MdTests(unittest.TestCase):
         md = conv.convert('<video><source src="https://m/pluginfile.php/1/v.mp4">Kurzvideo</video>')
         self.assertEqual(md, "[Video: Kurzvideo](_media/video.mp4)")
 
-    def test_embedded_moodle_files_use_file_resolver(self):
-        client = MoodleClient(SITE, "t" * 32)
-        cases = [
-            ('<iframe src="/pluginfile.php/1/mod_page/content/0/lecture.pdf" title="Lecture"></iframe>',
-             "lecture.pdf", "file", "[File: Lecture](_media/lecture.pdf)"),
-            ('<object data="/webservice/pluginfile.php/1/mod_page/content/0/clip.mp4"></object>',
-             "clip.mp4", "video", "[Video: clip.mp4](_media/clip.mp4)"),
-            ('<embed src="/tokenpluginfile.php/abc/1/mod_page/content/0/audio.mp3" title="Audio">',
-             "audio.mp3", "audio", "[Audio: Audio](_media/audio.mp3)"),
-        ]
-        for html, name, kind, expected in cases:
-            with self.subTest(name=name):
-                calls, embeds = [], []
-                def resolve(url, label, media_kind):
-                    calls.append((url, media_kind))
-                    return "_media/" + name
-                conv = Converter(base_url=SITE + "/mod/page/view.php?id=1", resolve_file=resolve,
-                                 is_site_url=client.is_site_url,
-                                 on_embed=lambda *args: embeds.append(args))
-                self.assertEqual(conv.convert(html), expected)
-                self.assertEqual(calls[0][1], kind)
-                self.assertEqual(len(calls), 1)
-                self.assertEqual(embeds, [])
-
-    def test_embedded_pages_and_external_files_stay_links(self):
-        client = MoodleClient(SITE, "t" * 32)
-        calls, embeds = [], []
-        def resolve(*args):
-            calls.append(args)
-            return "wrong-local-file.pdf"
-        conv = Converter(resolve_file=resolve, is_site_url=client.is_site_url,
-                         on_embed=lambda *args: embeds.append(args))
-        html = (f'<iframe src="{SITE}/mod/page/view.php?id=1"></iframe>'
-                '<iframe src="https://external.example/pluginfile.php/1/secret.pdf"></iframe>'
-                '<iframe src="https://www.youtube.com/embed/abcdefghijk" title="Clip"></iframe>')
-        md = conv.convert(html)
-        self.assertEqual(calls, [])
-        self.assertEqual(len(embeds), 3)
-        self.assertIn(f"({SITE}/mod/page/view.php?id=1)", md)
-        self.assertIn("https://external.example/pluginfile.php/1/secret.pdf", md)
-        self.assertIn("[Video (YouTube): Clip](https://www.youtube.com/watch?v=abcdefghijk)", md)
-
-    def test_embedded_file_resolver_failure_keeps_original_link(self):
-        client = MoodleClient(SITE, "t" * 32)
-        seen = []
-        conv = Converter(resolve_file=lambda *args: None, is_site_url=client.is_site_url,
-                         on_embed=lambda *args: seen.append(args))
-        url = SITE + "/pluginfile.php/1/mod_page/content/0/lecture.pdf"
-        self.assertEqual(conv.convert(f'<iframe src="{url}"></iframe>'),
-                         f"[Contenuto incorporato]({url})")
-        self.assertEqual(len(seen), 1)
-
     def test_escaping_and_line_starts(self):
         md = to_markdown("<p>5 * 3 und datei_name, _wichtig_</p><p># keine Überschrift</p><p>1. kein Listenpunkt</p>")
         self.assertEqual(md, "5 \\* 3 und datei_name, \\_wichtig\\_\n\n\\# keine Überschrift\n\n\\1. kein Listenpunkt")

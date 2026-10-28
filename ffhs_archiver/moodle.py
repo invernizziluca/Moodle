@@ -128,6 +128,8 @@ _SECRET_PATTERNS = (
     (re.compile(r"(--sso-channel[\s=]+)\S+"), r"\1***"),
     (re.compile(r"(tokenpluginfile\.php/)[0-9a-f]{32}", re.I), r"\1***"),
     (re.compile(r"(sesskey=)[^&\s\"'<>]+", re.I), r"\1***"),
+    (re.compile(r"([?&](?:ks|key)=)[^&\s\"'<>]+", re.I), r"\1***"),
+    (re.compile(r"(\"ks\"\s*:\s*\")[^\"]+", re.I), r"\1***"),
 )
 
 
@@ -504,3 +506,198 @@ class MoodleClient:
 
 def http_date(ts: float) -> str:
     return email.utils.formatdate(ts, usegmt=True)
+
+
+# --------------------------------------------------------------------------- video session
+# Hosts the video download may contact. The Moodle session cookie is sent (by the cookie jar,
+# scoped by domain) only to the Moodle and KAF hosts; the Kaltura CDN receives only the Kaltura
+# session key in the URL. The web-service token and the private token are used *only* for the one
+# official autologin call to the Moodle site, never sent to any other host.
+VIDEO_HOST_SUFFIXES = (".kaltura.com", ".switch.ch")
+AUTOLOGIN_FUNCTION = "tool_mobile_get_autologin_key"  # official: opens web content as the logged-in user
+# Moodle serves the app autologin only to clients identifying as the app (contains "MoodleMobile").
+# We state both that client type and this tool's name, so the request is honest about what it is.
+MOODLE_APP_UA = f"MoodleMobile 4.5.0 ({USER_AGENT})"
+
+
+class VideoSession:
+    """A browser-like, authenticated session used only to download the user's own lecture videos.
+
+    It logs the user in through Moodle's official *autologin* (the mechanism the Moodle app uses to
+    open web content as the signed-in user), keeping a cookie jar, and then fetches media from the
+    Moodle, KAF and Kaltura/SWITCH hosts. It never writes anything and never touches course data.
+    """
+
+    def __init__(self, client: MoodleClient, privatetoken: str = "") -> None:
+        self.client = client
+        self.site_url = client.site_url
+        self._site = urllib.parse.urlsplit(self.site_url)
+        self.token = client.token
+        self.privatetoken = privatetoken or ""
+        self.cancel_event = client.cancel_event
+        self.available = True
+        self.reason = ""
+        self._started = False
+        self._ok = False
+        import http.cookiejar
+        self._jar = http.cookiejar.CookieJar()
+        ctx = ssl.create_default_context()
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler(), urllib.request.HTTPSHandler(context=ctx),
+            urllib.request.HTTPCookieProcessor(self._jar))
+        # Moodle's official autologin endpoint (the one the mobile/desktop app uses) is served only to
+        # clients whose User-Agent identifies as the Moodle app (core_useragent::is_moodle_app(), an
+        # anti-XSS guard). We hold the app's own token + private token from the official login and call
+        # the app's own endpoint, so we identify honestly as a Moodle-app client naming this tool.
+        self._opener.addheaders = [("User-Agent", MOODLE_APP_UA), ("Accept", "*/*")]
+
+    # -- host policy ------------------------------------------------------
+    def _host_ok(self, url: str) -> bool:
+        try:
+            host = urllib.parse.urlsplit(url).hostname or ""
+        except ValueError:
+            return False
+        host = host.lower()
+        if host == self._site.hostname or host == f"kaf.{self._site.hostname}":
+            return True
+        return any(host == suf.lstrip(".") or host.endswith(suf) for suf in VIDEO_HOST_SUFFIXES)
+
+    def _check(self, url: str) -> None:
+        if self.cancel_event.is_set():
+            raise CancelledError()
+        if not self._host_ok(url):
+            raise MoodleError(f"Host non consentito per i video: {urllib.parse.urlsplit(url).hostname}", "blockedhost")
+
+    # -- autologin --------------------------------------------------------
+    def _autologin_key(self) -> dict:
+        """Official Moodle autologin key (needs the private token). Not a course-data function."""
+        data = [("wstoken", self.token), ("wsfunction", AUTOLOGIN_FUNCTION),
+                ("moodlewsrestformat", "json"), ("privatetoken", self.privatetoken)]
+        url = f"{self.site_url}/webservice/rest/server.php?moodlewsrestformat=json&wsfunction={AUTOLOGIN_FUNCTION}"
+        req = urllib.request.Request(url, data=urllib.parse.urlencode(data).encode("utf-8"),
+                                     headers={"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"})
+        with self._opener.open(req, timeout=self.client.timeout) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        if isinstance(result, dict) and result.get("errorcode"):
+            raise MoodleError(redact(result.get("message", ""), self.token), result.get("errorcode", ""))
+        return result if isinstance(result, dict) else {}
+
+    def ensure_session(self) -> bool:
+        if self._started:
+            return self._ok
+        self._started = True
+        if not self.privatetoken:
+            self.available, self.reason = False, "token privato non disponibile: accedi di nuovo con i video attivi"
+            return False
+        try:
+            info = self._autologin_key()
+            key = info.get("key")
+            autologinurl = info.get("autologinurl") or f"{self.site_url}/admin/tool/mobile/autologin.php"
+            uid = (self.client.site_info_data or {}).get("userid") or self.client.site_info().get("userid")
+            if not key:
+                raise MoodleError("Chiave di autologin non restituita", "noautologin")
+            target = (f"{autologinurl}?userid={uid}&key={urllib.parse.quote(str(key))}"
+                      f"&urltogo={urllib.parse.quote(self.site_url + '/my/')}")
+            self._check(target)
+            with self._opener.open(urllib.request.Request(target), timeout=self.client.timeout) as resp:
+                page = resp.read(8192).decode("utf-8", "replace")
+            if "login/index.php" in page and "<form" in page.lower():
+                raise MoodleError("Autologin non riuscito", "autologinfailed")
+            self._ok = True
+        except (urllib.error.URLError, MoodleError, ValueError, OSError) as exc:
+            self.available = False
+            self.reason = ("download dei video non disponibile: "
+                           + ("l'autologin dell'app non è attivo su questo Moodle"
+                              if isinstance(exc, MoodleError) and exc.errorcode in
+                              ("autologinkeygenerationexceeded", "autologinnotallowed", "noautologin",
+                               "autologinfailed") else redact(str(exc), self.token)))
+            log.info("Video session unavailable: %s", redact(str(exc), self.token))
+            self._ok = False
+        return self._ok
+
+    # -- fetching ---------------------------------------------------------
+    def _open(self, url: str, data: bytes | None = None, headers: dict | None = None, timeout: float | None = None):
+        self._check(url)
+        req = urllib.request.Request(url, data=data, headers=headers or {})
+        return self._opener.open(req, timeout=timeout or self.client.timeout)
+
+    def get_text(self, url: str) -> str:
+        with self._open(url) as resp:
+            return resp.read().decode("utf-8", "replace")
+
+    def post_text(self, url: str, fields: dict) -> str:
+        body = urllib.parse.urlencode(fields).encode("utf-8")
+        with self._open(url, data=body,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"}) as resp:
+            return resp.read().decode("utf-8", "replace")
+
+    def get_bytes(self, url: str) -> bytes:
+        with self._open(url) as resp:
+            return resp.read()
+
+    def looks_like_media(self, url: str) -> bool:
+        """True if ``url`` serves real media (not an error page): used to prefer a single MP4."""
+        try:
+            with self._open(url, headers={"Range": "bytes=0-0"}) as resp:
+                ctype = resp.headers.get("Content-Type", "").lower()
+                if resp.status in (200, 206) and (ctype.startswith(("video/", "audio/"))
+                                                  or "mpegurl" in ctype or "octet-stream" in ctype):
+                    return True
+        except (urllib.error.URLError, MoodleError, OSError) as exc:
+            log.debug("media probe failed: %s", exc)
+        return False
+
+    def stream(self, url: str, dest: Path, progress: Callable[[int, int | None], None] | None = None) -> int:
+        dest = Path(dest)
+        part = dest.with_name(dest.name + ".part")
+        fsutil.ensure_dir(dest.parent)
+        with self._open(url, timeout=max(self.client.timeout, 300)) as resp:
+            total = resp.headers.get("Content-Length")
+            total_size = int(total) if total and total.isdigit() else None
+            written = 0
+            with open(fsutil.lp(part), "wb") as fh:
+                while True:
+                    if self.cancel_event.is_set():
+                        raise CancelledError()
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    written += len(chunk)
+                    if progress:
+                        progress(written, total_size)
+        if fsutil.exists(dest):
+            fsutil.remove(dest)
+        fsutil.move(part, dest)
+        return written
+
+    def concat(self, dest: Path, segment_urls: list, progress: Callable[[int, int | None], None] | None = None) -> int:
+        """Download HLS segments (optionally an init segment first) and join them into one file."""
+        dest = Path(dest)
+        part = dest.with_name(dest.name + ".part")
+        fsutil.ensure_dir(dest.parent)
+        written = 0
+        with open(fsutil.lp(part), "wb") as fh:
+            for seg in segment_urls:
+                if self.cancel_event.is_set():
+                    raise CancelledError()
+                data = self._segment(seg)
+                fh.write(data)
+                written += len(data)
+                if progress:
+                    progress(written, None)
+        if fsutil.exists(dest):
+            fsutil.remove(dest)
+        fsutil.move(part, dest)
+        return written
+
+    def _segment(self, url: str, attempts: int = 3) -> bytes:
+        last: Exception | None = None
+        for n in range(attempts):
+            try:
+                return self.get_bytes(url)
+            except (urllib.error.URLError, OSError) as exc:
+                last = exc
+                if self.cancel_event.wait(1.5 * (n + 1)):
+                    raise CancelledError()
+        raise NetworkError(f"Segmento video non scaricato: {redact(str(last), self.token)}")

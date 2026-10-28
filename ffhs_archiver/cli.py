@@ -28,15 +28,16 @@ def _client_or_exit(session: Session):
 def cmd_login(args, settings: Settings) -> int:
     """Login by copy & paste (the command line never touches the Windows registry)."""
     session = Session()
+    keep = bool(getattr(args, "videos", False))
     if args.paste:
-        creds, _ = session.finish_login(args.paste, require_signature=False)
+        creds, _ = session.finish_login(args.paste, require_signature=False, keep_private_token=keep)
     else:
         attempt = session.start_login(method="other" if args.other else "ffhs-id",
                                       open_browser=not args.no_browser, use_handler=False)
         print("Apri questo indirizzo nel browser e accedi:\n" + attempt.url)
         print("\nPoi incolla qui il link «moodlemobile://token=…» della pagina finale e premi Invio:")
         text = sys.stdin.readline().strip()
-        creds, _ = session.finish_login(text, require_signature=False)
+        creds, _ = session.finish_login(text, require_signature=False, keep_private_token=keep)
     print(f"Connesso come {creds.fullname} ({creds.sitename}, Moodle {creds.release}). "
           f"Token salvato ({creds.protection}).")
     return 0
@@ -75,12 +76,18 @@ def cmd_courses(args, settings: Settings) -> int:
 
 
 def cmd_export(args, settings: Settings) -> int:
-    client, _ = _client_or_exit(Session())
+    client, creds = _client_or_exit(Session())
+    want_videos = bool(getattr(args, "videos", False))
+    want_capture = bool(getattr(args, "capture_pages", False)) and not bool(getattr(args, "no_capture", False))
+    need_token = want_videos or want_capture
     opts = ExportOptions(dest=args.dest or settings.archive_dir, include_forums=not args.no_forums,
                          include_quiz_reviews=not args.no_quiz, include_submissions=not args.no_submissions,
-                         include_videos=not args.no_videos, max_file_mb=args.max_mb,
+                         include_videos=not args.no_videos, download_videos=want_videos,
+                         capture_pages=want_capture,
+                         private_token=(creds.privatetoken if need_token else ""), max_file_mb=args.max_mb,
                          keep_versions=not args.no_versions, save_raw_json=args.raw,
-                         anonymize_others=not args.show_names)
+                         anonymize_others=not args.show_names,
+                         obsidian_ready=not getattr(args, "no_obsidian", False))
     cancel = threading.Event()
 
     def emit(event: dict) -> None:
@@ -130,6 +137,9 @@ def cmd_sync(args, settings: Settings) -> int:
     args.no_quiz = not settings.include_quiz_reviews
     args.no_submissions = not settings.include_submissions
     args.no_videos = not settings.include_videos
+    args.videos = settings.download_videos
+    args.no_capture = not settings.capture_pages
+    args.capture_pages = settings.capture_pages
     args.no_versions = not settings.keep_versions
     args.raw = settings.save_raw_json
     args.show_names = not settings.anonymize_others
@@ -170,6 +180,9 @@ def main(argv=None) -> int:
     p.add_argument("--paste", help="link moodlemobile://token=… o chiave")
     p.add_argument("--other", action="store_true", help="pagina di login normale invece di FFHS-ID diretto")
     p.add_argument("--no-browser", action="store_true")
+    p.add_argument("--videos", action="store_true",
+                   help="conserva il token privato per scaricare i video delle lezioni e catturare le pagine "
+                        "del corso (Modulplan)")
     sub.add_parser("verify", help="verifica accesso e sistema, senza scaricare nulla")
     p = sub.add_parser("preview", help="anteprima della struttura di un corso, senza scaricare nulla")
     p.add_argument("--course", type=int, required=True)
@@ -181,8 +194,15 @@ def main(argv=None) -> int:
     p.add_argument("--no-forums", action="store_true")
     p.add_argument("--no-quiz", action="store_true")
     p.add_argument("--no-submissions", action="store_true")
-    p.add_argument("--no-videos", action="store_true")
+    p.add_argument("--no-videos", action="store_true", help="non scaricare i file video caricati in Moodle")
+    p.add_argument("--no-capture", action="store_true",
+                   help="non catturare le pagine che richiedono login (es. Modulplan)")
+    p.add_argument("--capture-pages", action="store_true",
+                   help="cattura avanzata delle pagine tramite auto-login, disattivata normalmente")
+    p.add_argument("--videos", action="store_true",
+                   help="scarica anche i video in streaming delle lezioni FFHS (Kaltura/SWITCHcast), uso personale")
     p.add_argument("--no-versions", action="store_true")
+    p.add_argument("--no-obsidian", action="store_true", help="non creare la configurazione .obsidian")
     p.add_argument("--raw", action="store_true", help="salva anche i dati tecnici grezzi (diagnosi)")
     p.add_argument("--show-names", action="store_true", help="non nascondere i nomi degli altri studenti")
     p.add_argument("--max-mb", type=int, default=0)

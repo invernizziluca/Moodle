@@ -46,6 +46,7 @@ class TokenResult:
     token: str
     signature_ok: bool | None  # None when a bare 32-character key was pasted (nothing to verify)
     had_private_token: bool = False
+    private_token: str = ""  # kept only when the user enabled video download (see session.finish_login)
 
 
 def new_passport() -> str:
@@ -102,7 +103,8 @@ def extract_token(text: str, wwwroot: str, passports: list) -> TokenResult:
     signature, token = parts[0].strip().lower(), parts[1].strip().lower()
     ok = any(secrets.compare_digest(hashlib.md5((wwwroot + p).encode("utf-8")).hexdigest(), signature)
              for p in passports)
-    return TokenResult(token=token, signature_ok=ok, had_private_token=len(parts) > 2 and bool(parts[2]))
+    private = parts[2].strip() if len(parts) > 2 and parts[2].strip() else ""
+    return TokenResult(token=token, signature_ok=ok, had_private_token=bool(private), private_token=private)
 
 
 def is_valid_callback_url(url: str) -> bool:

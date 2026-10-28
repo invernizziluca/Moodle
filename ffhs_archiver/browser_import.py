@@ -16,12 +16,24 @@ from typing import Iterable
 from urllib.parse import unquote, urlsplit
 
 from .html2md import escape_md, md_url
-from .naming import UniqueNames, safe_filename
+from .naming import UniqueNames, rel_link, safe_filename
+
+
+def _is_link(path: Path) -> bool:
+    """Reject symlinks and Windows directory junctions before copying."""
+    if path.is_symlink():
+        return True
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    return bool(getattr(info, "st_file_attributes", 0) &
+                getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 
 
 def _archive_root(directory: str | Path) -> Path:
     root = Path(directory).absolute()
-    if root.is_symlink() or not root.is_dir():
+    if _is_link(root) or not root.is_dir():
         raise ValueError("La cartella dell'archivio deve essere una directory reale esistente")
     return root.resolve(strict=True)
 
@@ -35,7 +47,7 @@ def _inside(root: Path, relative: str) -> Path:
     result = root
     for part in rel.parts:
         result = result / part
-        if result.is_symlink():
+        if _is_link(result):
             raise ValueError("I collegamenti simbolici non sono ammessi nell'archivio")
     resolved = result.resolve(strict=True)
     if not resolved.is_relative_to(root):
@@ -79,8 +91,13 @@ def list_activities(archive_root: str | Path, course_id: int) -> list[dict]:
                 note = _inside(course_root, md)
                 if not note.is_file() or note.parent == course_root:
                     raise ValueError("Nota dell'attività non valida")
+                # Older exports keep A/A.md; the user's newer layout keeps
+                # section/A.md beside an optional attachment directory section/A.
+                directory = note.parent if note.stem == note.parent.name else note.with_suffix("")
+                if _is_link(directory) or directory.exists() and not directory.is_dir():
+                    raise ValueError("La cartella allegati dell'attività non è una directory reale")
                 activities.append({"key": key, "title": str(node.get("title") or key),
-                                   "directory": note.parent, "md": note})
+                                   "directory": directory, "md": note})
                 keys.add(key)
             visit(node.get("children") or [])
 
@@ -90,11 +107,24 @@ def list_activities(archive_root: str | Path, course_id: int) -> list[dict]:
 
 def _regular_source(source: str | Path) -> Path:
     path = Path(source).absolute()
-    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+    if _is_link(path) or any(_is_link(parent) for parent in path.parents):
         raise ValueError("Seleziona file normali, non collegamenti simbolici")
     if not stat.S_ISREG(path.stat().st_mode):
         raise ValueError("È possibile importare soltanto file normali")
     return path
+
+
+def _prepare_activity_folder(activity: dict) -> bool:
+    """Create only the attachment directory validated from an existing note."""
+    folder = activity["directory"]
+    if _is_link(folder) or _is_link(folder.parent):
+        raise ValueError("La cartella allegati non può essere un collegamento")
+    if folder.exists():
+        if not folder.is_dir():
+            raise ValueError("La cartella allegati è occupata da un file")
+        return False
+    folder.mkdir()
+    return True
 
 
 def import_files(sources: Iterable[str | Path], archive_root: str | Path,
@@ -113,6 +143,7 @@ def import_files(sources: Iterable[str | Path], archive_root: str | Path,
     files = [_regular_source(source) for source in sources]
     if not files:
         raise ValueError("Seleziona almeno un file da importare")
+    folder_created = _prepare_activity_folder(activity)
     names = UniqueNames()
     for existing in folder.iterdir():
         names.reserve(existing.name)
@@ -133,7 +164,7 @@ def import_files(sources: Iterable[str | Path], archive_root: str | Path,
                     shutil.copyfileobj(src, dest)
         lines = ["---", "title: Materiali aggiunti dal browser", "type: manual", "---", "",
                  "# Materiali aggiunti dal browser", "",
-                 f"Attività: [{escape_md(activity['title'])}]({md_url(activity['md'].name)})", "",
+                 f"Attività: [{escape_md(activity['title'])}]({rel_link(note.as_posix(), activity['md'].as_posix())})", "",
                  "Importazione manuale di file scelti dall'utente. La presenza di questi file non "
                  "certifica la completezza del corso né la corrispondenza con il contenuto Moodle.", ""]
         lines.extend(f"- [{escape_md(file.name)}]({md_url(file.name)})" for file in copied)
@@ -146,6 +177,8 @@ def import_files(sources: Iterable[str | Path], archive_root: str | Path,
             target.unlink(missing_ok=True)
         if note_created:
             note.unlink(missing_ok=True)
+        if folder_created:
+            folder.rmdir()
         raise
 
 
@@ -187,7 +220,7 @@ def import_directory(source_dir: str | Path, archive_root: str | Path,
         raise ValueError("Attività non presente nel corso esportato")
     activity = matches[0]
     source = Path(source_dir).absolute()
-    if source.is_symlink() or any(parent.is_symlink() for parent in source.parents) or not source.is_dir():
+    if _is_link(source) or any(_is_link(parent) for parent in source.parents) or not source.is_dir():
         raise ValueError("Seleziona una cartella HLS reale, non un collegamento simbolico")
     source = source.resolve(strict=True)
     # Importing the archive into one of its own activities would recursively
@@ -200,7 +233,7 @@ def import_directory(source_dir: str | Path, archive_root: str | Path,
     for current, dirnames, filenames in os.walk(source, followlinks=False):
         for name in [*dirnames, *filenames]:
             path = Path(current) / name
-            if path.is_symlink():
+            if _is_link(path):
                 raise ValueError("La cartella HLS non può contenere collegamenti simbolici")
             rel = path.relative_to(source)
             if len(rel.parts) > 12 or len(rel.as_posix()) > 180:
@@ -227,6 +260,7 @@ def import_directory(source_dir: str | Path, archive_root: str | Path,
         p.relative_to(source).as_posix() not in ("video.m3u8", "master.m3u8"),
         len(p.relative_to(source).parts), p.relative_to(source).as_posix()))
     folder = activity["directory"]
+    folder_created = _prepare_activity_folder(activity)
     names = UniqueNames()
     for entry in folder.iterdir():
         names.reserve(entry.name)
@@ -251,7 +285,7 @@ def import_directory(source_dir: str | Path, archive_root: str | Path,
         local_url = local_playlist.relative_to(folder).as_posix()
         lines = ["---", "title: Materiali aggiunti dal browser", "type: manual", "---", "",
                  "# Materiali aggiunti dal browser", "",
-                 f"Attività: [{escape_md(activity['title'])}]({md_url(activity['md'].name)})", "",
+                 f"Attività: [{escape_md(activity['title'])}]({rel_link(note.as_posix(), activity['md'].as_posix())})", "",
                  f"- [Apri playlist HLS]({md_url(local_url)})", "",
                  f"Copiati {len(files)} file mantenendo i nomi e i percorsi relativi della cartella HLS.", "",
                  "Importazione manuale: apri la playlist con un lettore compatibile (per esempio VLC). "
@@ -267,4 +301,6 @@ def import_directory(source_dir: str | Path, archive_root: str | Path,
             shutil.rmtree(destination)
         if note_created:
             note.unlink(missing_ok=True)
+        if folder_created:
+            folder.rmdir()
         raise

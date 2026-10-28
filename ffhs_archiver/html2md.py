@@ -691,7 +691,7 @@ class Converter:
             return f" {escape_md(value)} " if value else ""
         if tag == "q":
             return "„" + self._inline_children(node) + "“"
-        if tag in ("iframe", "video", "audio", "object", "embed"):
+        if tag in ("iframe", "video", "audio"):
             return " " + " ".join(self._block(node)) + " "
         if tag == "span" and has_class(node, "filter_mathjaxloader_equation", "nolink"):
             return self._inline_children(node)
@@ -938,8 +938,52 @@ def unescape_name(name: str) -> str:
         _html.unescape(name or "")).strip()
 
 
+_REGION_MAIN_RE = re.compile(r'<(div|section|main)\b[^>]*\bid\s*=\s*["\']region-main["\'][^>]*>', re.I)
+_ROLE_MAIN_RE = re.compile(r'<(div|section|main)\b[^>]*\brole\s*=\s*["\']main["\'][^>]*>', re.I)
+_ACTIVITY_HEADER_RE = re.compile(
+    r'<div\b[^>]*\bdata-for\s*=\s*["\']page-activity-header["\'][^>]*>.*?</div>\s*</div>\s*</div>', re.I | re.S)
+
+
+def _inner_html(text: str, start: re.Match) -> str:
+    """Inner HTML of the element ``start`` matched, balanced on its own tag name."""
+    tag = start.group(1).lower()
+    begin = start.end()
+    depth = 1
+    for m in re.compile(r'<(/?)%s\b[^>]*>' % tag, re.I).finditer(text, begin):
+        depth += -1 if m.group(1) else 1
+        if depth == 0:
+            return text[begin:m.start()]
+    return text[begin:]
+
+
+def extract_region_main(html_text: str) -> str:
+    """Inner HTML of Moodle's main content area, for pages only reachable with a login session
+    (e.g. an FFHS ``ffhssyllabus`` Modulplan). Prefers the Boost ``#region-main`` container, then the
+    inner ``role="main"`` content block, and drops scripts, styles, the activity header and completion
+    forms. Returns "" when no main region is present, so the caller can flag the page instead."""
+    if not html_text:
+        return ""
+    m = _REGION_MAIN_RE.search(html_text)
+    inner = _inner_html(html_text, m) if m else ""
+    if not inner:
+        rm0 = _ROLE_MAIN_RE.search(html_text)
+        if not rm0:
+            return ""
+        inner = _inner_html(html_text, rm0)
+    else:
+        rm = _ROLE_MAIN_RE.search(inner)
+        if rm:
+            inner = _inner_html(inner, rm)
+    inner = _ACTIVITY_HEADER_RE.sub(" ", inner)
+    inner = re.sub(r'<script\b.*?</script>', " ", inner, flags=re.I | re.S)
+    inner = re.sub(r'<style\b.*?</style>', " ", inner, flags=re.I | re.S)
+    inner = re.sub(r'<noscript\b.*?</noscript>', " ", inner, flags=re.I | re.S)
+    inner = re.sub(r'<form\b[^>]*completion[^>]*>.*?</form>', " ", inner, flags=re.I | re.S)
+    return inner.strip()
+
+
 __all__ = [
     "Converter", "Node", "parse_html", "html_to_text", "to_markdown", "quiz_question_to_markdown",
     "shift_headings", "rebase_links", "md_url", "escape_md", "classify_media_url", "unescape_name",
-    "is_video_filename", "is_audio_filename", "parse_qs",
+    "is_video_filename", "is_audio_filename", "parse_qs", "extract_region_main",
 ]

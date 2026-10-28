@@ -1,42 +1,36 @@
-# Sviluppo e verifiche locali
+# Sviluppo 0.5
 
-Il progetto usa la libreria standard di Python 3.10 o successivo. Non serve `pip install`.
-La GUI è destinata a Windows con Tk; l'esportatore e i test offline possono essere eseguiti su Linux.
-
-Dal checkout, ad esempio `/workspace/Moodle` nell'ambiente cloud:
+Python 3.10+, libreria standard e Tk. Nessuna dipendenza pip, browser dedicato o estensione nostra.
+Da `/workspace/Moodle` esegui test isolati da eventuali credenziali:
 
 ```bash
-cd /workspace/Moodle
-FFHS_ARCHIVER_HOME="$(mktemp -d)" python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 -m ffhs_archiver --help
+python3 - <<'PY'
+import os, subprocess, sys, tempfile
+with tempfile.TemporaryDirectory(prefix='ffhs-tests-') as home:
+    result = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-q'],
+                            env=dict(os.environ, FFHS_ARCHIVER_HOME=home))
+sys.exit(result.returncode)
+PY
 ```
 
-La prima istruzione usa una cartella applicativa temporanea senza credenziali esistenti.
-I test che richiedono un Moodle di laboratorio autenticato vengono saltati: uno skip non dimostra
-che login e download reali funzionino. Non eseguire `tests/e2e_login.py` o altre prove di accesso
-come sostituti dei test offline.
+I test di laboratorio autenticati sono saltati quando il servizio non è disponibile. Gli skip
+non validano FFHS. Le funzioni video avanzate della base allegata conservano i propri test, ma
+il flusso grafico scelto non le attiva.
 
-I test del codice Windows che simulano registro o canali locali non sostituiscono una verifica
-su Windows di DPAPI, protocollo `moodlemobile://`, ripristino del registro, browser SSO e MFA.
-Non chiedere password, token o cookie in chat e non inserirli nei test o negli archivi di esempio.
-
-Non è stata effettuata una validazione FFHS live nell'ambiente cloud. Il rapporto allegato
-dell'utente descrive una prova precedente sul suo computer; non è un risultato dei test qui eseguiti.
-L'archivio allegato `BWL8_Decision_Making_and_Change.zip` supera il limite di trasferimento
-di 32 MiB e non è stato aperto né verificato qui.
-
-La prova reale consigliata per Windows è descritta in [Novità 0.3](NOVITA_0.3.md).
-
-La versione corrente è 0.4: vedi anche [Novità 0.4](NOVITA_0.4.md) e `browser_helper/README.md`.
-I test dell'assistente richiedono Node soltanto per lo sviluppo, non per usare l'app su Windows.
-Il test di playback HLS usa ffmpeg se presente, altrimenti viene saltato esplicitamente.
-
-Per creare lo ZIP utente con percorsi brevi:
+Il nuovo flusso è verificato da `test_extension_bridge.py`, `test_extension_import.py`,
+`test_extension_workflow.py` e `test_browser_import.py`: file/ZIP reali, byte, link, rollback,
+deduplica, scelta della destinazione, metadati senza download/auto-login e rifiuto dei file modificati.
 
 ```bash
-python3 tools/package_release.py --output /tmp/FFHS_Archiver_v0.4.zip
+python3 tools/package_release.py --output /tmp/FFHS_Archiver_v0.5.zip
 ```
 
-Il campione storico è conservato in `docs/esempio_archivio/esempio_v02.zip`; non eseguire il
-validatore sulla sua cartella esterna come se fosse un archivio di corsi. Non serve estrarlo per
-avviare l'app. I nuovi archivi temporanei creati dai test vengono verificati direttamente.
+Il vecchio campione profondo è in `docs/esempio_archivio/esempio_v02.zip` e non serve per l'avvio.
+Non validare la sua cartella esterna come archivio. Per un archivio reale o temporaneo esportato:
+`python3 tests/verify_archive.py <cartella_archivio>`.
+
+Smoke GUI eseguito con Xorg dummy rootless temporaneo: App e dialoghi Tk reali, pulsanti e import
+reali, zero errori Tk. MP4 con video/audio generato, importato con SHA identico e decodificato offline.
+Solo lancio del browser simulato; nessun login FFHS reale o test delle estensioni installate.
+Il server di prova è stato fermato senza modificare policy o installazioni del sistema.

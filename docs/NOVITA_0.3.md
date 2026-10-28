@@ -1,5 +1,8 @@
 # Versione 0.3 — video e contenuti mancanti
 
+Note storiche della precedente release. Per i pulsanti e il flusso attuali con le estensioni
+reali consulta [Novità 0.5](NOVITA_0.5.md) e la guida corrente.
+
 La 0.3 estende l'individuazione dei file video diretti di Moodle: oltre ai materiali elencati nelle
 attività, riconosce gli indirizzi presenti nelle attività Link (URL) e nei tag `iframe`, `object` ed
 `embed`. Il download usa lo stesso servizio autenticato degli altri file e rispetta l'opzione video

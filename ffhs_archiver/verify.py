@@ -3,7 +3,9 @@ touch the archive. They are the first test on the real FFHS Moodle before any ex
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -12,8 +14,12 @@ from pathlib import Path
 from . import __version__
 from .exporter import LINK_ONLY_NOTES, MOD_LABELS, VIDEO_MODS, CourseExport, ExportOptions, Exporter, fmt_d, fmt_dt
 from .html2md import html_to_text, unescape_name
-from .moodle import FFHS_SITE, READ_ONLY_FUNCTIONS, MoodleClient, MoodleError, allowed_site
+from .kaltura import KalturaClient, parse_kaltura
+from .moodle import (AUTOLOGIN_FUNCTION, FFHS_SITE, READ_ONLY_FUNCTIONS, MoodleClient, MoodleError, VideoSession,
+                     allowed_site)
 from .naming import human_size
+
+_KALTURA_LAUNCH_RE = re.compile(r'https?:\\?/\\?/[^"\'\s]+?/filter/kaltura/lti_launch\.php\?[^"\'\s]+')
 
 OK, WARN, FAIL = "[OK]", "[!!]", "[NO]"  # plain text: readable in any font
 REQUIRED_FUNCTIONS = ("core_webservice_get_site_info", "core_enrol_get_users_courses", "core_course_get_contents")
@@ -126,7 +132,57 @@ def moodle_checks(client: MoodleClient | None, creds=None) -> tuple:
         checks.append(Check(OK if courses else WARN, "Corsi", f"{len(courses)} trovati"))
     except MoodleError as exc:
         checks.append(Check(FAIL, "Corsi", str(exc)))
+    checks.append(Check("[INFO]", "Video delle lezioni (Kaltura)",
+                        "gestiti con FetchV nel browser; nessuna richiesta di auto-login eseguita. "
+                        "Il download va verificato nella pagina Moodle."))
     return checks, courses
+
+
+def _find_kaltura_ref(client: MoodleClient, courses: list, max_courses: int = 5):
+    """Scan a few courses for one Kaltura/SWITCHcast lecture-video link (no download), for the probe."""
+    for c in courses[:max_courses]:
+        try:
+            contents = client.call("core_course_get_contents", courseid=int(c["id"]))
+        except (MoodleError, Exception):  # a probe must never break the verification
+            continue
+        m = _KALTURA_LAUNCH_RE.search(json.dumps(contents))
+        if m:
+            ref = parse_kaltura(m.group(0).replace("\\/", "/"))
+            if ref and ref.launch_url:
+                return ref, c
+    return None, None
+
+
+def _video_check(client: MoodleClient, creds, courses: list, autologin_ok: bool) -> "Check":
+    """Report whether the FFHS lecture videos (Kaltura/SWITCHcast) can be downloaded. When the private
+    token is present this actually *resolves* one video (without downloading it) to be sure."""
+    if not autologin_ok:
+        return Check(WARN, "Video delle lezioni (Kaltura)",
+                     "questo Moodle non espone l'autologin dell'app: i video resteranno come link")
+    has_private = bool(getattr(creds, "privatetoken", "")) if creds is not None else False
+    if not has_private:
+        return Check(OK, "Video delle lezioni (Kaltura)",
+                     "scaricabili con l'opzione «Scarica i video e cattura le pagine» · attivala e accedi di "
+                     "nuovo per usarla")
+    # Private token present: do a real, lightweight resolve of one entry (no bytes downloaded).
+    try:
+        session = VideoSession(client, creds.privatetoken)
+        if not session.ensure_session():
+            return Check(WARN, "Video delle lezioni (Kaltura)",
+                         f"accesso alla piattaforma video non riuscito: {session.reason}")
+        ref, course = _find_kaltura_ref(client, courses)
+        if ref is None:
+            return Check(OK, "Video delle lezioni (Kaltura)",
+                         "accesso alla piattaforma video riuscito (nessun video di prova trovato nei corsi campione)")
+        outcome = KalturaClient(session).probe(ref)
+        if outcome.status == "downloaded":
+            return Check(OK, "Video delle lezioni (Kaltura)",
+                         f"pronti al download (verificato su «{unescape_name(course.get('shortname', ''))}»)")
+        return Check(WARN, "Video delle lezioni (Kaltura)",
+                     f"accesso riuscito ma non ho potuto preparare un video di prova: {outcome.note}. "
+                     "Procedi pure: i video non scaricabili verranno comunque segnalati con il loro link")
+    except Exception as exc:  # the probe is best-effort
+        return Check(WARN, "Video delle lezioni (Kaltura)", f"controllo non completato: {exc}")
 
 
 def access_report(state_dir, client: MoodleClient | None, creds=None) -> str:

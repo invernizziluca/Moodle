@@ -1,7 +1,12 @@
-# Revisione di sicurezza — FFHS Moodle Archiver 0.2
+# Revisione di sicurezza — FFHS Moodle Archiver 0.2–0.3
 
-Data: 22 ottobre 2026 · Ambito: login SSO, gestione del token, registro di Windows, canale tra browser e
-programma, controllo degli URL, dati personali nell'archivio.
+Revisione storica fornita con la base allegata, non una certificazione della release corrente.
+Nella 0.5 la GUI usa le estensioni reali e non attiva la sessione di auto-login descritta in §7.
+Per il flusso e le verifiche attuali consulta [Novità 0.5](NOVITA_0.5.md).
+
+Data: 22 ottobre 2026 (0.2), aggiornata 28 ottobre 2026 (0.3) · Ambito: login SSO, gestione del token,
+registro di Windows, canale tra browser e programma, controllo degli URL, dati personali nell'archivio, e
+— per la 0.3 — la sessione web di autologin usata per scaricare i video e catturare le pagine (§7).
 
 Metodo: revisione del codice riga per riga (moduli `sso`, `session`, `protocol`, `ipc`, `securestore`,
 `moodle`, `exporter`, `gui`), confronto con il codice sorgente di Moodle 5.2 (`admin/tool/mobile/launch.php`),
@@ -16,6 +21,9 @@ test automatici e prove reali su un Moodle 5.2.4 di laboratorio configurato come
 - Nuova **Verifica accesso** e **Anteprima del corso**: il primo test sulla FFHS non scarica nulla e non
   crea l'archivio.
 - Rischi residui accettati e motivati in §3. Inventario di ciò che il programma tocca in §4.
+- **Novità 0.3** (download dei video Kaltura e cattura delle pagine del corso, p. es. il Modulplan): modello
+  di sicurezza in §7. In breve: una sola autorizzazione opzionale (il «private token», cifrato con DPAPI),
+  l'autologin **ufficiale** dell'app Moodle, host su lista chiusa, sole letture, e nessun aggiramento.
 
 ## 2. Problemi e correzioni
 
@@ -59,6 +67,12 @@ test automatici e prove reali su un Moodle 5.2.4 di laboratorio configurato come
   ambiente. Per questo la **Verifica accesso** esegue sul tuo PC un autotest di ciascun meccanismo prima
   di qualsiasi esportazione (anche prima dell'accesso). Se un autotest fallisce, il programma usa il link
   incollato e non modifica il registro.
+- **Forma della pagina del lettore Kaltura (KAF) e del Modulplan sulla FFHS reale** (0.3): la lettura dei
+  dati della sessione video dalla pagina KAF e l'estrazione del contenuto del `ffhssyllabus` dipendono dal
+  loro HTML, che non ho potuto osservare sulla FFHS. L'estrazione è stata resa robusta a più varianti e
+  verificata contro pagine reali di un Moodle di prova (tema Boost) e un server Kaltura simulato; se una
+  pagina non viene riconosciuta, il video o la pagina **restano segnalati** con il link (mai persi) e la
+  Verifica accesso lo dice prima dell'export. Nessun DRM viene aggirato: un video protetto resta segnalato.
 
 ## 4. Cosa tocca il programma
 
@@ -69,6 +83,11 @@ test automatici e prove reali su un Moodle 5.2.4 di laboratorio configurato come
   `/webservice/pluginfile.php` (download dei file),
   `/user/managetoken.php` (aperta nel browser solo se chiedi la revoca).
   Immagini o link verso altri siti presenti nei contenuti non vengono scaricati: restano link.
+- **Rete, solo con l'opzione video/pagine attiva** (§7): `/webservice/rest/server.php` per la sola funzione
+  ufficiale `tool_mobile_get_autologin_key`; `/admin/tool/mobile/autologin.php` per aprire la sessione web;
+  le pagine del lettore su `kaf.moodle.ffhs.ch` e i flussi video su `*.kaltura.com` / `*.switch.ch`. Lista
+  host chiusa (`VideoSession._host_ok`): qualunque altro host è rifiutato. Il private token è usato **solo**
+  per la chiamata di autologin, mai inviato ad altri host.
 - **Registro di Windows** (solo il tuo utente, nessun diritto di amministratore):
   `HKCU\Software\Classes\moodlemobile` solo durante un accesso (massimo 15 minuti);
   `HKCU\Software\FFHS Moodle Archiver\SelfTest` solo durante l'autotest, poi cancellata.
@@ -95,3 +114,47 @@ test automatici e prove reali su un Moodle 5.2.4 di laboratorio configurato come
   modifiche del docente, interruzione e ripresa; interfaccia pilotata con schermate.
 - Scansione degli archivi prodotti: nessun token o chiave, nessun dato grezzo, nessun nome di altri
   studenti.
+
+## 7. Funzioni della 0.3: download dei video e cattura delle pagine
+
+Entrambe aprono la FFHS **come te** per salvare materiale che puoi già vedere. Modello di sicurezza:
+
+- **Un'unica autorizzazione, opzionale e disattivabile.** Al login una sola spunta («Scarica i video delle
+  lezioni e cattura le pagine del corso») conserva il **private token** di Moodle, cifrato con DPAPI come il
+  token principale. Senza quella spunta il private token **non** viene salvato e le due funzioni non si
+  attivano: video e pagine restano segnalati con il link. È la stessa impostazione «opt-in» chiesta dalla
+  revisione, ora estesa anche alla cattura delle pagine (stessa capacità sottostante).
+- **Autologin ufficiale, non un trucco.** La sessione web (`VideoSession`) usa `tool_mobile_get_autologin_key`
+  — la funzione con cui l'app Moodle apre i contenuti web come l'utente connesso — e poi
+  `admin/tool/mobile/autologin.php`. Moodle impone **HTTPS** per questa funzione (verificato: su HTTP la
+  rifiuta), quindi vale solo verso `https://moodle.ffhs.ch`. Il programma si identifica onestamente come
+  client dell'app Moodle che nomina questo strumento.
+- **Host su lista chiusa.** La sessione contatta solo `moodle.ffhs.ch`, `kaf.moodle.ffhs.ch`,
+  `*.kaltura.com`, `*.switch.ch` (`VideoSession._host_ok`). Il cookie di sessione è inviato per dominio solo
+  a Moodle/KAF; il CDN Kaltura riceve solo la chiave di sessione Kaltura nell'URL.
+- **Solo lettura, nessun aggiramento.** Si scarica il flusso video che l'utente può già guardare e si legge
+  l'HTML della pagina che l'utente può già aprire (`view.php` dei moduli del suo corso). Nessuna scrittura,
+  nessun tentativo di quiz, nessun accesso a materiale non autorizzato. Un video protetto da DRM o non
+  scaricabile **resta segnalato**, non viene forzato.
+- **Cattura pagine limitata e trasparente.** Solo i tipi di modulo in `CAPTURE_MODS` (oggi `ffhssyllabus`)
+  passano per la cattura; di ogni pagina si estrae la **sola area di contenuto** (`#region-main` del tema
+  Boost), scartando navigazione, intestazioni di attività e script. Il risultato è una nota Markdown come le
+  altre; i file e le immagini interni seguono il normale download.
+- **Niente di nuovo nell'archivio o nei log.** Nessun token, cookie o chiave Kaltura finisce nell'archivio o
+  nei log (stesso filtro di oscuramento della 0.2, F9). La **Verifica accesso**, con l'opzione attiva,
+  risolve un video senza scaricarlo e riferisce se funziona, con una diagnosi **oscurata** (presenza/assenza
+  dei dati, mai i valori).
+
+Test della 0.3 (oltre ai precedenti, tutti ancora superati):
+
+- Catena video completa (autologin → form LTI → pagina KAF → playManifest → MP4 progressivo / HLS) su un
+  server locale fedele, con la **vera** `VideoSession`; e con **veri file video** generati con ffmpeg e
+  ricontrollati con ffprobe (l'MP4 e i segmenti HLS uniti risultano riproducibili).
+- Estrazione del contenuto (`#region-main`) verificata contro pagine **reali** di un Moodle di prova (tema
+  Boost): pagine `mod/page`, con tabelle, liste, immagini e incorporamenti; nessuna fuga di navigazione o
+  footer. Cattura del Modulplan verificata sul formato tipico (`tests/test_capture.py`).
+- Raccolta dei video Kaltura su URL con il **formato reale della FFHS** (`lti_launch.php?...entryid/0_…`) in
+  un export reale sul laboratorio: il video viene raccolto e, quando non scaricabile, segnalato senza
+  interrompere l'export.
+- In totale 116 test automatici senza rete superati con Python 3.11, 3.13 e 3.15, più i test di login,
+  download e interfaccia sul laboratorio.

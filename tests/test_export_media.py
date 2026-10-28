@@ -169,6 +169,20 @@ class ExportMediaTests(unittest.TestCase):
         self.assertIn("| Solo link |", inventory)
         self.assertEqual(verify_archive(self.dest), 0)
 
+    def test_structure_only_preparation_keeps_metadata_without_file_download_or_autologin(self):
+        with patch.object(self.client, "download", side_effect=AssertionError("file download forbidden")), \
+                patch("ffhs_archiver.exporter.VideoSession", side_effect=AssertionError("autologin forbidden")):
+            result, root = self.export(download_files=False, download_videos=False, capture_pages=False)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(self.opener.file_requests, [])
+        self.assertEqual(result["counts"]["skipped"], 3)
+        self.assertEqual(list(root.rglob("*.mp4")), [])
+        structure = json.loads((root / "course_structure.json").read_text(encoding="utf-8"))
+        records = [child for section in structure["sections"] for child in section["children"]]
+        names = {file["name"] for record in records for file in record.get("files", [])}
+        self.assertEqual(names, set(FILES))
+        self.assertEqual(verify_archive(self.dest), 0)
+
     def test_no_missing_claim_is_limited_to_the_processed_data(self):
         self.opener.contents[0]["modules"] = self.opener.contents[0]["modules"][:1]
         result, root = self.export()
